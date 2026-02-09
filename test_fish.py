@@ -231,6 +231,17 @@ def test_search_stations_nearby_returns_data(mock_get):
 
 
 @patch("fish.httpx.get")
+def test_search_stations_nearby_paginates(mock_get):
+    mock_get.side_effect = [
+        _mock_response([{"code_station": "S1"}], cursor="abc"),
+        _mock_response([{"code_station": "S2"}]),
+    ]
+    result = fish.search_stations_nearby(48.85, 2.35, 25)
+    assert len(result) == 2
+    assert mock_get.call_count == 2
+
+
+@patch("fish.httpx.get")
 def test_search_stations_nearby_empty(mock_get):
     mock_get.return_value = _mock_response([])
     result = fish.search_stations_nearby(48.85, 2.35, 25)
@@ -334,10 +345,15 @@ def test_get_historical_average_cache_hit():
 
 
 @patch("fish.fetch_obs_elab")
-def test_get_historical_average_cache_miss_triggers_prepopulate(mock_fetch):
-    today_iso = date.today().isoformat()
-    mock_fetch.return_value = [{"date_obs_elab": today_iso, "resultat_obs_elab": 300.0}]
-    cache = {"year": 2026, "data": {}}
+@patch("fish.date")
+def test_get_historical_average_cache_miss_triggers_prepopulate(mock_date, mock_fetch):
+    fixed = date(2025, 3, 1)
+    mock_date.today.return_value = fixed
+    mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+    mock_fetch.return_value = [
+        {"date_obs_elab": fixed.isoformat(), "resultat_obs_elab": 300.0}
+    ]
+    cache = {"year": 2025, "data": {}}
     avg, count = fish.get_historical_average("X", "HmnJ", cache)
     assert avg == 300.0
     assert count == 10  # 10 years, same value each

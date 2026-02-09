@@ -36,20 +36,27 @@ def geocode(location: str) -> tuple[float, float]:
 
 def search_stations_nearby(lat: float, lon: float, radius_km: float) -> list[dict]:
     """Find hydrometric stations within radius_km of a point."""
-    resp = httpx.get(
-        f"{BASE}/referentiel/stations",
-        params={
-            "latitude": lat,
-            "longitude": lon,
-            "distance": radius_km,
-            "en_service": "true",
-            "format": "json",
-            "size": 20,
-        },
-        timeout=TIMEOUT,
-    )
-    resp.raise_for_status()
-    return resp.json().get("data", [])
+    params: dict = {
+        "latitude": lat,
+        "longitude": lon,
+        "distance": radius_km,
+        "en_service": "true",
+        "format": "json",
+        "size": 20,
+    }
+    stations: list[dict] = []
+    cursor: str | None = None
+    while True:
+        if cursor:
+            params["cursor"] = cursor
+        resp = httpx.get(f"{BASE}/referentiel/stations", params=params, timeout=TIMEOUT)
+        resp.raise_for_status()
+        body = resp.json()
+        stations.extend(body.get("data", []))
+        cursor = body.get("next")
+        if not cursor:
+            break
+    return stations
 
 
 def search_stations(query: str) -> None:
@@ -293,7 +300,9 @@ def display_table(
     print(f"  {BOLD}{row_str(headers)}{RESET}")
     print(f"  {'─' * (sum(col_w) + 2 * (len(col_w) - 1))}")
     for river, name, code, today_s, avg_s in fmt_rows:
-        r_str = row_str((river, name, f"{DIM}{code}{RESET}", today_s, avg_s))
+        r_str = row_str((river, name, code, today_s, avg_s))
+        # Apply dim styling to the code column after padding
+        r_str = r_str.replace(code, f"{DIM}{code}{RESET}", 1)
         print(f"  {r_str}")
     print()
 
