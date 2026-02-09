@@ -2,11 +2,16 @@
 """French river water height console tool using Hub'Eau API."""
 
 import argparse
+import json
 import sys
+from collections import defaultdict
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import httpx
 import plotext as plt
+
+CACHE_PATH = Path.home() / ".cache" / "fish" / "hist_avg.json"
 
 BASE = "https://hubeau.eaufrance.fr/api/v2/hydrometrie"
 GEOCODE_URL = "https://api-adresse.data.gouv.fr/search/"
@@ -186,6 +191,111 @@ def fetch_historical_average(code: str, grandeur: str) -> tuple[float | None, in
     return sum(values) / len(values), len(values)
 
 
+def load_cache() -> dict:
+    """Load historical average cache from disk."""
+    try:
+        raw = CACHE_PATH.read_text()
+        cache = json.loads(raw)
+        if cache.get("year") != date.today().year:
+            return {"year": date.today().year, "data": {}}
+        return cache
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        return {"year": date.today().year, "data": {}}
+
+
+def save_cache(cache: dict) -> None:
+    """Save historical average cache to disk."""
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_PATH.write_text(json.dumps(cache))
+
+
+def prepopulate_cache(code: str, grandeur: str, cache: dict) -> None:
+    """Fetch 3 months of historical averages (today+90d) across 10 years, store in cache."""
+    today = date.today()
+    end = today + timedelta(days=90)
+    by_day: dict[str, list[float]] = defaultdict(list)
+
+    for year_offset in range(1, 11):
+        try:
+            d_min = today.replace(year=today.year - year_offset)
+            d_max = end.replace(year=today.year - year_offset)
+        except ValueError:
+            continue
+        year = today.year - year_offset
+        print(
+            f"  Caching {code} {grandeur} [{year_offset}/10] {year}...",
+            end="\r",
+            file=sys.stderr,
+        )
+        try:
+            obs = fetch_obs_elab(code, d_min.isoformat(), d_max.isoformat(), grandeur)
+        except (httpx.HTTPStatusError, httpx.TimeoutException):
+            continue
+        for o in obs:
+            val = o.get("resultat_obs_elab")
+            if val is not None:
+                md = o["date_obs_elab"][5:10]  # MM-DD
+                by_day[md].append(val)
+
+    # Clear progress line
+    print(" " * 60, end="\r", file=sys.stderr)
+
+    for md, vals in by_day.items():
+        key = f"{code}:{md}:{grandeur}"
+        cache["data"][key] = [sum(vals) / len(vals), len(vals)]
+
+
+def get_historical_average(
+    code: str, grandeur: str, cache: dict
+) -> tuple[float | None, int]:
+    """Get cached historical average, prepopulating on miss."""
+    md = date.today().strftime("%m-%d")
+    key = f"{code}:{md}:{grandeur}"
+    if key not in cache["data"]:
+        prepopulate_cache(code, grandeur, cache)
+    entry = cache["data"].get(key)
+    if entry:
+        return entry[0], entry[1]
+    return None, 0
+
+
+def display_table(rows: list[tuple[str, str, float | None, float | None, int]]) -> None:
+    """Print a table of station data."""
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
+    headers = ("River", "Station", "Today", "10y avg")
+    # Compute column widths
+    fmt_rows = []
+    for river, name, today_val, avg_val, avg_count in rows:
+        today_s = f"{today_val:.0f} mm" if today_val is not None else "— mm"
+        if avg_val is not None:
+            avg_s = f"{avg_val:.0f} mm ({avg_count}y)"
+        else:
+            avg_s = "—"
+        fmt_rows.append((river, name, today_s, avg_s))
+
+    col_w = [len(h) for h in headers]
+    for r in fmt_rows:
+        for i, cell in enumerate(r):
+            col_w[i] = max(col_w[i], len(cell))
+
+    def row_str(
+        cells: tuple[str, ...], right_align: tuple[bool, ...] = (False,) * 4
+    ) -> str:
+        parts = []
+        for cell, w, ra in zip(cells, col_w, right_align):
+            parts.append(cell.rjust(w) if ra else cell.ljust(w))
+        return "  ".join(parts)
+
+    print(f"  {BOLD}{row_str(headers, (False, False, True, True))}{RESET}")
+    print(f"  {'─' * (sum(col_w) + 2 * (len(col_w) - 1))}")
+    for river, name, today_s, avg_s in fmt_rows:
+        r_str = row_str((river, name, today_s, avg_s), (False, False, True, True))
+        print(f"  {r_str}")
+    print()
+
+
 def fetch_rain_forecast(lat: float, lon: float) -> list[tuple[str, float]]:
     """Fetch 8-hour rain forecast from Open-Meteo. Returns list of (hour_label, mm)."""
     try:
@@ -237,76 +347,6 @@ def fetch_sunlight(lat: float, lon: float) -> dict | None:
         }
     except Exception:
         return None
-
-
-def display_station_info(station: dict) -> None:
-    """Display station metadata in a box."""
-    BOLD = "\033[1m"
-    CYAN = "\033[36m"
-    GREEN = "\033[32m"
-    RESET = "\033[0m"
-
-    name = station.get("libelle_station", "?")
-    river = station.get("libelle_cours_eau", "?")
-    code = station["code_station"]
-
-    fields = [
-        ("Station", name),
-        ("Code", code),
-        ("River", river),
-        (
-            "Coordinates",
-            f"{station.get('latitude_station', '?')}, {station.get('longitude_station', '?')}",
-        ),
-        (
-            "Altitude",
-            f"{station.get('altitude_ref_alti_station', '?')} m"
-            if station.get("altitude_ref_alti_station") is not None
-            else "?",
-        ),
-        ("Status", "Active" if station.get("en_service") else "Inactive"),
-        ("Département", station.get("code_departement", "?")),
-    ]
-
-    max_label = max(len(f[0]) for f in fields)
-    max_value = max(len(str(f[1])) for f in fields)
-    box_width = max_label + max_value + 7
-
-    print(f"{CYAN}┌{'─' * box_width}┐{RESET}")
-    title = f"{river} à {name}"
-    print(
-        f"{CYAN}│{RESET}  {BOLD}{CYAN}{title}{RESET}{' ' * (box_width - len(title) - 2)}{CYAN}│{RESET}"
-    )
-    print(f"{CYAN}├{'─' * box_width}┤{RESET}")
-    for label, value in fields:
-        line = f"{GREEN}{label:<{max_label}}{RESET}  {value}"
-        visible_len = max_label + 2 + len(str(value))
-        print(
-            f"{CYAN}│{RESET}  {line}{' ' * (box_width - visible_len - 2)}{CYAN}│{RESET}"
-        )
-    print(f"{CYAN}└{'─' * box_width}┘{RESET}")
-
-    forecast = fetch_rain_forecast(
-        station.get("latitude_station", 0), station.get("longitude_station", 0)
-    )
-    if forecast:
-        print(f"\n  {BOLD}Rain forecast (next 8h):{RESET}")
-        max_mm = max(mm for _, mm in forecast)
-        for hour, mm in forecast:
-            bar = "▇" * round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else ""
-            print(f"  {hour}  {mm:4.1f} mm  {CYAN}{bar}{RESET}")
-
-    sun = fetch_sunlight(
-        station.get("latitude_station", 0), station.get("longitude_station", 0)
-    )
-    if sun:
-        YELLOW = "\033[33m"
-        print(f"\n  {BOLD}Sunlight:{RESET}")
-        print(f"  {YELLOW}☀{RESET}  Sunrise       {sun['sunrise']}")
-        print(f"  {YELLOW}☀{RESET}  Sunset        {sun['sunset']}")
-        print(
-            f"  {YELLOW}☀{RESET}  Peak sunlight {sun['peak_start']} – {sun['peak_end']}"
-        )
 
 
 def display(
@@ -375,11 +415,41 @@ def display(
         )
 
 
+def fetch_today_level(code: str) -> float | None:
+    """Fetch the latest real-time water height for a station."""
+    resp = httpx.get(
+        f"{BASE}/observations_tr",
+        params={
+            "code_entite": code,
+            "grandeur_hydro": "H",
+            "size": 1,
+            "sort": "desc",
+            "format": "json",
+        },
+        timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json().get("data", [])
+    if data and data[0].get("resultat_obs") is not None:
+        return data[0]["resultat_obs"]
+    return None
+
+
 def plot_station(station: dict) -> None:
     """Fetch data and display plot for a single station."""
     code = station["code_station"]
-    dates, values, grandeur = fetch_recent_3months(code)
-    avg, avg_count = fetch_historical_average(code, grandeur) if grandeur else (None, 0)
+    try:
+        dates, values, grandeur = fetch_recent_3months(code)
+        avg, avg_count = (
+            fetch_historical_average(code, grandeur) if grandeur else (None, 0)
+        )
+    except httpx.HTTPStatusError as e:
+        name = station.get("libelle_station", code)
+        print(
+            f"  Skipping {name} ({code}): API error {e.response.status_code}",
+            file=sys.stderr,
+        )
+        return
     display(station, dates, values, avg, avg_count)
 
 
@@ -394,20 +464,10 @@ def main() -> None:
     parser.add_argument(
         "--station-list", metavar="QUERY", help="Search stations by name or river"
     )
-    parser.add_argument(
-        "--station-info", action="store_true", help="Show station details only"
-    )
     args = parser.parse_args()
 
     if args.station_list:
         search_stations(args.station_list)
-        return
-
-    if args.station_info:
-        if not args.station:
-            parser.error("--station-info requires --station CODE")
-        station = get_station_info(args.station)
-        display_station_info(station)
         return
 
     if args.station:
@@ -420,13 +480,66 @@ def main() -> None:
         sys.exit(1)
 
     lat, lon = geocode(args.location)
-    stations = search_stations_nearby(lat, lon, 100)
+    stations = search_stations_nearby(lat, lon, 25)
     if not stations:
-        print(f"No stations found within 100 km of '{args.location}'.")
+        print(f"No stations found within 25 km of '{args.location}'.")
         sys.exit(1)
     print(f"Found {len(stations)} station(s) near {args.location}\n")
+
+    DIM = "\033[2m"
+    RESET = "\033[0m"
+
+    cache = load_cache()
+    rows = []
     for station in stations:
-        plot_station(station)
+        code = station["code_station"]
+        name = station.get("libelle_station") or "?"
+        river = station.get("libelle_cours_eau") or "?"
+        try:
+            today_val = fetch_today_level(code)
+        except (httpx.HTTPStatusError, httpx.TimeoutException):
+            print(
+                f"  {DIM}{river} à {name} ({code}): unavailable{RESET}",
+                file=sys.stderr,
+            )
+            continue
+        # Pick grandeur from recent data for historical average
+        try:
+            _, _, grandeur = fetch_recent_3months(code)
+        except (httpx.HTTPStatusError, httpx.TimeoutException):
+            grandeur = ""
+        if grandeur:
+            avg_val, avg_count = get_historical_average(code, grandeur, cache)
+        else:
+            avg_val, avg_count = None, 0
+        rows.append((river, name, today_val, avg_val, avg_count))
+
+    display_table(rows)
+    save_cache(cache)
+
+    # Weather and sunlight for the searched location
+    BOLD = "\033[1m"
+    CYAN = "\033[36m"
+    YELLOW = "\033[33m"
+    RESET = "\033[0m"
+
+    forecast = fetch_rain_forecast(lat, lon)
+    if forecast:
+        print(f"  {BOLD}Rain forecast (next 8h):{RESET}")
+        max_mm = max(mm for _, mm in forecast)
+        for hour, mm in forecast:
+            bar = "▇" * round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else ""
+            print(f"  {hour}  {mm:4.1f} mm  {CYAN}{bar}{RESET}")
+        print()
+
+    sun = fetch_sunlight(lat, lon)
+    if sun:
+        print(f"  {BOLD}Sunlight:{RESET}")
+        print(f"  {YELLOW}☀{RESET}  Sunrise       {sun['sunrise']}")
+        print(f"  {YELLOW}☀{RESET}  Sunset        {sun['sunset']}")
+        print(
+            f"  {YELLOW}☀{RESET}  Peak sunlight {sun['peak_start']} – {sun['peak_end']}"
+        )
 
 
 if __name__ == "__main__":

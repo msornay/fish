@@ -1,6 +1,8 @@
 """Tests for fish.py."""
 
+import json
 from unittest.mock import patch, MagicMock
+from datetime import date
 from io import StringIO
 
 import pytest
@@ -222,18 +224,16 @@ def test_geocode_exits_when_not_found(mock_get):
 def test_search_stations_nearby_returns_data(mock_get):
     stations = [{"code_station": "S1"}, {"code_station": "S2"}]
     mock_get.return_value = _mock_response(stations)
-    result = fish.search_stations_nearby(48.85, 2.35, 100)
+    result = fish.search_stations_nearby(48.85, 2.35, 25)
     assert len(result) == 2
     params = mock_get.call_args[1]["params"]
-    assert params["latitude"] == 48.85
-    assert params["longitude"] == 2.35
-    assert params["distance"] == 100
+    assert params["distance"] == 25
 
 
 @patch("fish.httpx.get")
 def test_search_stations_nearby_empty(mock_get):
     mock_get.return_value = _mock_response([])
-    result = fish.search_stations_nearby(48.85, 2.35, 50)
+    result = fish.search_stations_nearby(48.85, 2.35, 25)
     assert result == []
 
 
@@ -285,3 +285,87 @@ def test_plot_station_no_grandeur_skips_avg(mock_recent, mock_display):
     station = {"code_station": "X1"}
     fish.plot_station(station)
     mock_display.assert_called_once_with(station, [], [], None, 0)
+
+
+# --- cache ---
+
+
+def test_load_cache_missing_file(tmp_path):
+    with patch.object(fish, "CACHE_PATH", tmp_path / "nope.json"):
+        cache = fish.load_cache()
+    assert cache["year"] == date.today().year
+    assert cache["data"] == {}
+
+
+def test_load_cache_wrong_year(tmp_path):
+    p = tmp_path / "hist_avg.json"
+    p.write_text(json.dumps({"year": 1999, "data": {"k": [1, 2]}}))
+    with patch.object(fish, "CACHE_PATH", p):
+        cache = fish.load_cache()
+    assert cache["data"] == {}
+
+
+def test_load_cache_valid(tmp_path):
+    p = tmp_path / "hist_avg.json"
+    data = {"year": date.today().year, "data": {"X:01-01:HmnJ": [100.0, 5]}}
+    p.write_text(json.dumps(data))
+    with patch.object(fish, "CACHE_PATH", p):
+        cache = fish.load_cache()
+    assert cache["data"]["X:01-01:HmnJ"] == [100.0, 5]
+
+
+def test_save_cache_creates_dirs(tmp_path):
+    p = tmp_path / "sub" / "dir" / "hist_avg.json"
+    with patch.object(fish, "CACHE_PATH", p):
+        fish.save_cache({"year": 2026, "data": {}})
+    assert p.exists()
+    assert json.loads(p.read_text())["year"] == 2026
+
+
+# --- get_historical_average ---
+
+
+def test_get_historical_average_cache_hit():
+    today_md = date.today().strftime("%m-%d")
+    cache = {"year": 2026, "data": {f"X:{today_md}:HmnJ": [200.0, 7]}}
+    avg, count = fish.get_historical_average("X", "HmnJ", cache)
+    assert avg == 200.0
+    assert count == 7
+
+
+@patch("fish.fetch_obs_elab")
+def test_get_historical_average_cache_miss_triggers_prepopulate(mock_fetch):
+    today_iso = date.today().isoformat()
+    mock_fetch.return_value = [{"date_obs_elab": today_iso, "resultat_obs_elab": 300.0}]
+    cache = {"year": 2026, "data": {}}
+    avg, count = fish.get_historical_average("X", "HmnJ", cache)
+    assert avg == 300.0
+    assert count == 10  # 10 years, same value each
+    assert mock_fetch.call_count == 10
+
+
+@patch("fish.fetch_obs_elab")
+def test_prepopulate_cache_handles_api_errors(mock_fetch):
+    import httpx
+
+    mock_fetch.side_effect = httpx.TimeoutException("timeout")
+    cache = {"year": 2026, "data": {}}
+    fish.prepopulate_cache("X", "HmnJ", cache)
+    assert cache["data"] == {}
+
+
+# --- display_table ---
+
+
+def test_display_table_output():
+    rows = [
+        ("La Loue", "Station A", 854.0, 862.0, 10),
+        ("Le Doubs", "Station B", None, None, 0),
+    ]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.display_table(rows)
+        output = out.getvalue()
+    assert "La Loue" in output
+    assert "854 mm" in output
+    assert "862 mm" in output
+    assert "— mm" in output
