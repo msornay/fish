@@ -186,6 +186,28 @@ def fetch_historical_average(code: str, grandeur: str) -> tuple[float | None, in
     return sum(values) / len(values), len(values)
 
 
+def fetch_rain_forecast(lat: float, lon: float) -> list[tuple[str, float]]:
+    """Fetch 8-hour rain forecast from Open-Meteo. Returns list of (hour_label, mm)."""
+    try:
+        resp = httpx.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "hourly": "precipitation",
+                "forecast_hours": 8,
+            },
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("hourly", {})
+        times = data.get("time", [])
+        precip = data.get("precipitation", [])
+        return [(t.split("T")[1], p) for t, p in zip(times, precip)]
+    except Exception:
+        return []
+
+
 def display_station_info(station: dict) -> None:
     """Display station metadata in a box."""
     BOLD = "\033[1m"
@@ -232,6 +254,16 @@ def display_station_info(station: dict) -> None:
             f"{CYAN}│{RESET}  {line}{' ' * (box_width - visible_len - 2)}{CYAN}│{RESET}"
         )
     print(f"{CYAN}└{'─' * box_width}┘{RESET}")
+
+    forecast = fetch_rain_forecast(
+        station.get("latitude_station", 0), station.get("longitude_station", 0)
+    )
+    if forecast:
+        print(f"\n  {BOLD}Rain forecast (next 8h):{RESET}")
+        max_mm = max(mm for _, mm in forecast)
+        for hour, mm in forecast:
+            bar = "▇" * round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else ""
+            print(f"  {hour}  {mm:4.1f} mm  {CYAN}{bar}{RESET}")
 
 
 def display(
