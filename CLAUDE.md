@@ -17,3 +17,5 @@
 - Branch naming: use descriptive kebab-case (e.g. `add-rain-forecast`, `fix-pagination-bug`).
 - Push the branch and create a PR with `gh pr create`.
 - Wait for CI to pass and the PR to be reviewed before merging.
+- Always add `@copilot` as a reviewer on PRs (`gh pr edit --add-reviewer copilot`).
+- Wait for Copilot's review comments before proceeding. Address comments that are valid; dismiss ones that are not.
