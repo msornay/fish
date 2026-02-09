@@ -2,7 +2,7 @@
 
 import json
 from unittest.mock import patch, MagicMock
-from datetime import date
+from datetime import date, timedelta
 from io import StringIO
 
 import pytest
@@ -285,9 +285,9 @@ def test_fetch_rain_forecast_returns_empty_on_error(mock_get):
 def test_plot_station_calls_display(mock_recent, mock_avg, mock_display):
     station = {"code_station": "X1"}
     fish.plot_station(station)
-    mock_recent.assert_called_once_with("X1")
-    mock_avg.assert_called_once_with("X1", "HmnJ")
-    mock_display.assert_called_once_with(station, ["2025-03-01"], [100], 150.0, 5)
+    mock_recent.assert_called_once_with("X1", None)
+    mock_avg.assert_called_once_with("X1", "HmnJ", None)
+    mock_display.assert_called_once_with(station, ["2025-03-01"], [100], 150.0, 5, None)
 
 
 @patch("fish.display")
@@ -295,7 +295,7 @@ def test_plot_station_calls_display(mock_recent, mock_avg, mock_display):
 def test_plot_station_no_grandeur_skips_avg(mock_recent, mock_display):
     station = {"code_station": "X1"}
     fish.plot_station(station)
-    mock_display.assert_called_once_with(station, [], [], None, 0)
+    mock_display.assert_called_once_with(station, [], [], None, 0, None)
 
 
 # --- cache ---
@@ -451,3 +451,147 @@ def test_plot_station_skips_on_http_error(mock_recent):
     station = {"code_station": "X1", "libelle_station": "Test"}
     # Should not raise, just print to stderr and return
     fish.plot_station(station)
+
+
+# --- --date argument ---
+
+
+def test_date_argument_parsing():
+    parser = fish.argparse.ArgumentParser()
+    parser.add_argument("location", nargs="?")
+    parser.add_argument("--date", type=date.fromisoformat, default=None)
+    args = parser.parse_args(["Paris", "--date", "2025-06-15"])
+    assert args.date == date(2025, 6, 15)
+
+
+def test_date_argument_default_is_none():
+    parser = fish.argparse.ArgumentParser()
+    parser.add_argument("location", nargs="?")
+    parser.add_argument("--date", type=date.fromisoformat, default=None)
+    args = parser.parse_args(["Paris"])
+    assert args.date is None
+
+
+# --- fetch_date_level ---
+
+
+@patch("fish.fetch_obs_elab")
+def test_fetch_date_level_returns_value(mock_fetch):
+    mock_fetch.return_value = [
+        {"grandeur_hydro_elab": "HmnJ", "resultat_obs_elab": 500.0},
+    ]
+    result = fish.fetch_date_level("X1", date(2025, 6, 15))
+    mock_fetch.assert_called_once_with("X1", "2025-06-15", "2025-06-15")
+    assert result == 500.0
+
+
+@patch("fish.fetch_obs_elab")
+def test_fetch_date_level_returns_none_when_no_data(mock_fetch):
+    mock_fetch.return_value = []
+    result = fish.fetch_date_level("X1", date(2025, 6, 15))
+    assert result is None
+
+
+@patch("fish.fetch_obs_elab")
+def test_fetch_date_level_returns_none_when_no_height_grandeur(mock_fetch):
+    mock_fetch.return_value = [
+        {"grandeur_hydro_elab": "QmnJ", "resultat_obs_elab": 100.0},
+    ]
+    result = fish.fetch_date_level("X1", date(2025, 6, 15))
+    assert result is None
+
+
+# --- fetch_rain_forecast with past date ---
+
+
+@patch("fish.date")
+@patch("fish.httpx.get")
+def test_fetch_rain_forecast_past_date_uses_archive(mock_get, mock_date):
+    mock_date.today.return_value = date(2026, 2, 9)
+    mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+    resp = MagicMock()
+    resp.json.return_value = {
+        "hourly": {
+            "time": ["2025-06-15T10:00", "2025-06-15T11:00"],
+            "precipitation": [0.3, 0.0],
+        }
+    }
+    resp.raise_for_status.return_value = None
+    mock_get.return_value = resp
+    result = fish.fetch_rain_forecast(48.85, 2.35, date(2025, 6, 15))
+    assert result == [("10:00", 0.3), ("11:00", 0.0)]
+    call_url = mock_get.call_args[0][0]
+    assert "archive" in call_url
+
+
+# --- fetch_sunlight with explicit date ---
+
+
+@patch("fish.httpx.get")
+def test_fetch_sunlight_with_explicit_date(mock_get):
+    resp = MagicMock()
+    resp.json.return_value = {
+        "daily": {
+            "sunrise": ["2025-06-15T05:45"],
+            "sunset": ["2025-06-15T21:45"],
+        }
+    }
+    resp.raise_for_status.return_value = None
+    mock_get.return_value = resp
+    result = fish.fetch_sunlight(48.85, 2.35, date(2025, 6, 15))
+    assert result["sunrise"] == "05:45"
+    params = mock_get.call_args[1]["params"]
+    assert params["start_date"] == "2025-06-15"
+    assert params["end_date"] == "2025-06-15"
+    assert "forecast_days" not in params
+
+
+# --- fetch_recent_3months with target_date ---
+
+
+@patch("fish.fetch_obs_elab")
+def test_fetch_recent_3months_with_target_date(mock_fetch):
+    mock_fetch.return_value = [
+        {
+            "grandeur_hydro_elab": "HmnJ",
+            "date_obs_elab": "2025-06-15",
+            "resultat_obs_elab": 300,
+        },
+    ]
+    target = date(2025, 6, 15)
+    dates, values, grandeur = fish.fetch_recent_3months("X", target)
+    call_args = mock_fetch.call_args
+    assert call_args[0][1] == (target - timedelta(days=90)).isoformat()
+    assert call_args[0][2] == target.isoformat()
+
+
+# --- display_table with target_date ---
+
+
+def test_display_table_with_past_date():
+    rows = [("La Loue", "Station A", "X001", 854.0, 862.0, 10)]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.display_table(rows, date(2025, 6, 15))
+        output = out.getvalue()
+    assert "Jun 15" in output
+    assert "Today" not in output
+
+
+# --- plot_station with target_date ---
+
+
+@patch("fish.display")
+@patch("fish.fetch_historical_average", return_value=(150.0, 5))
+@patch(
+    "fish.fetch_recent_3months",
+    return_value=(["2025-06-15"], [100], "HmnJ"),
+)
+def test_plot_station_with_target_date(mock_recent, mock_avg, mock_display):
+    station = {"code_station": "X1"}
+    target = date(2025, 6, 15)
+    fish.plot_station(station, target)
+    mock_recent.assert_called_once_with("X1", target)
+    mock_avg.assert_called_once_with("X1", "HmnJ", target)
+    mock_display.assert_called_once_with(
+        station, ["2025-06-15"], [100], 150.0, 5, target
+    )
