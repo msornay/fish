@@ -9,7 +9,42 @@ import httpx
 import plotext as plt
 
 BASE = "https://hubeau.eaufrance.fr/api/v2/hydrometrie"
+GEOCODE_URL = "https://api-adresse.data.gouv.fr/search/"
 TIMEOUT = 30
+
+
+def geocode(location: str) -> tuple[float, float]:
+    """Geocode a location name using the French address API. Returns (lat, lon)."""
+    resp = httpx.get(
+        GEOCODE_URL,
+        params={"q": location, "limit": 1},
+        timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    features = resp.json().get("features", [])
+    if not features:
+        print(f"Could not geocode '{location}'.", file=sys.stderr)
+        sys.exit(1)
+    lon, lat = features[0]["geometry"]["coordinates"]
+    return lat, lon
+
+
+def search_stations_nearby(lat: float, lon: float, radius_km: float) -> list[dict]:
+    """Find hydrometric stations within radius_km of a point."""
+    resp = httpx.get(
+        f"{BASE}/referentiel/stations",
+        params={
+            "latitude": lat,
+            "longitude": lon,
+            "distance": radius_km,
+            "en_service": "true",
+            "format": "json",
+            "size": 20,
+        },
+        timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json().get("data", [])
 
 
 def search_stations(query: str) -> None:
@@ -265,11 +300,26 @@ def display(
         )
 
 
+def plot_station(station: dict) -> None:
+    """Fetch data and display plot for a single station."""
+    code = station["code_station"]
+    dates, values, grandeur = fetch_recent_3months(code)
+    avg, avg_count = (
+        fetch_historical_average(code, grandeur) if grandeur else (None, 0)
+    )
+    display(station, dates, values, avg, avg_count)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="French river water height console tool"
     )
-    parser.add_argument("station", nargs="?", help="Station code (e.g. F700000103)")
+    parser.add_argument(
+        "location", nargs="?", help="Location name (e.g. Paris, Lyon)"
+    )
+    parser.add_argument(
+        "--station", metavar="CODE", help="Plot a specific station by code"
+    )
     parser.add_argument(
         "--station-list", metavar="QUERY", help="Search stations by name or river"
     )
@@ -282,21 +332,30 @@ def main() -> None:
         search_stations(args.station_list)
         return
 
-    if not args.station:
-        parser.print_help()
-        sys.exit(1)
-
-    station = get_station_info(args.station)
-
     if args.station_info:
+        if not args.station:
+            parser.error("--station-info requires --station CODE")
+        station = get_station_info(args.station)
         display_station_info(station)
         return
 
-    dates, values, grandeur = fetch_recent_3months(args.station)
-    avg, avg_count = (
-        fetch_historical_average(args.station, grandeur) if grandeur else (None, 0)
-    )
-    display(station, dates, values, avg, avg_count)
+    if args.station:
+        station = get_station_info(args.station)
+        plot_station(station)
+        return
+
+    if not args.location:
+        parser.print_help()
+        sys.exit(1)
+
+    lat, lon = geocode(args.location)
+    stations = search_stations_nearby(lat, lon, 100)
+    if not stations:
+        print(f"No stations found within 100 km of '{args.location}'.")
+        sys.exit(1)
+    print(f"Found {len(stations)} station(s) near {args.location}\n")
+    for station in stations:
+        plot_station(station)
 
 
 if __name__ == "__main__":
