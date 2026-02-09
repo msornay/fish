@@ -11,3 +11,9 @@
 - Lint: `ruff check .`
 - Format: `ruff format .`
 - Both are enforced in CI and required to pass before merging to `main`.
+
+## Git Workflow
+- Never commit directly to `main`. Always create a feature branch and open a PR.
+- Branch naming: use descriptive kebab-case (e.g. `add-rain-forecast`, `fix-pagination-bug`).
+- Push the branch and create a PR with `gh pr create`.
+- Wait for CI to pass and the PR to be reviewed before merging.
