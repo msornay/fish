@@ -595,3 +595,60 @@ def test_plot_station_with_target_date(mock_recent, mock_avg, mock_display):
     mock_display.assert_called_once_with(
         station, ["2025-06-15"], [100], 150.0, 5, target
     )
+
+
+# --- future date handling ---
+
+
+@patch("fish.fetch_obs_elab")
+@patch("fish.date")
+def test_fetch_recent_3months_caps_end_to_today_for_future(mock_date, mock_fetch):
+    fixed_today = date(2026, 2, 9)
+    mock_date.today.return_value = fixed_today
+    mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+    mock_fetch.return_value = []
+    future = date(2026, 8, 10)
+    fish.fetch_recent_3months("X", future)
+    call_args = mock_fetch.call_args[0]
+    # End date should be capped to today, not the future date
+    assert call_args[2] == fixed_today.isoformat()
+
+
+@patch("fish.httpx.get")
+def test_fetch_sunlight_falls_back_to_last_year_for_far_future(mock_get):
+    # First call returns 400 (out of range), second call succeeds
+    bad_resp = MagicMock()
+    bad_resp.status_code = 400
+
+    good_resp = MagicMock()
+    good_resp.json.return_value = {
+        "daily": {
+            "sunrise": ["2025-08-10T06:15"],
+            "sunset": ["2025-08-10T21:00"],
+        }
+    }
+    good_resp.raise_for_status.return_value = None
+    mock_get.side_effect = [bad_resp, good_resp]
+
+    future = date(2026, 8, 10)
+    with patch("fish.date") as mock_date:
+        mock_date.today.return_value = date(2026, 2, 9)
+        mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        result = fish.fetch_sunlight(48.85, 2.35, future)
+
+    assert result is not None
+    assert result["sunrise"] == "06:15"
+    # Second call should use archive API with 2025-08-10
+    call_url = mock_get.call_args_list[1][0][0]
+    assert "archive" in call_url
+    fallback_params = mock_get.call_args_list[1][1]["params"]
+    assert fallback_params["start_date"] == "2025-08-10"
+
+
+def test_display_table_shows_today_for_future_date():
+    rows = [("La Loue", "Station A", "X001", 854.0, 862.0, 10)]
+    future = date.today() + timedelta(days=180)
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.display_table(rows, future)
+        output = out.getvalue()
+    assert "Today" in output
