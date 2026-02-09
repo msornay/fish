@@ -370,3 +370,68 @@ def test_display_table_output():
     assert "854 mm" in output
     assert "862 mm" in output
     assert "— mm" in output
+
+
+# --- fetch_sunlight ---
+
+
+@patch("fish.httpx.get")
+def test_fetch_sunlight_parses_response(mock_get):
+    resp = MagicMock()
+    resp.json.return_value = {
+        "daily": {
+            "sunrise": ["2025-06-15T06:00"],
+            "sunset": ["2025-06-15T21:30"],
+        }
+    }
+    resp.raise_for_status.return_value = None
+    mock_get.return_value = resp
+    result = fish.fetch_sunlight(48.85, 2.35)
+    assert result["sunrise"] == "06:00"
+    assert result["sunset"] == "21:30"
+    assert "peak_start" in result
+    assert "peak_end" in result
+
+
+@patch("fish.httpx.get")
+def test_fetch_sunlight_returns_none_on_error(mock_get):
+    mock_get.side_effect = Exception("network error")
+    assert fish.fetch_sunlight(48.85, 2.35) is None
+
+
+# --- fetch_today_level ---
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_returns_value(mock_get):
+    mock_get.return_value = _mock_response([{"resultat_obs": 1234.0}])
+    assert fish.fetch_today_level("X1") == 1234.0
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_returns_none_when_empty(mock_get):
+    mock_get.return_value = _mock_response([])
+    assert fish.fetch_today_level("X1") is None
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_returns_none_when_no_result(mock_get):
+    mock_get.return_value = _mock_response([{"resultat_obs": None}])
+    assert fish.fetch_today_level("X1") is None
+
+
+# --- plot_station error handling ---
+
+
+@patch("fish.fetch_recent_3months")
+def test_plot_station_skips_on_http_error(mock_recent):
+    import httpx
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_recent.side_effect = httpx.HTTPStatusError(
+        "not found", request=MagicMock(), response=mock_resp
+    )
+    station = {"code_station": "X1", "libelle_station": "Test"}
+    # Should not raise, just print to stderr and return
+    fish.plot_station(station)
