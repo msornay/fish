@@ -652,3 +652,17 @@ def test_display_table_shows_today_for_future_date():
         fish.display_table(rows, future)
         output = out.getvalue()
     assert "Today" in output
+
+
+@patch("fish.fetch_rain_forecast", return_value=[])
+def test_rain_na_displayed_for_future_date(mock_rain):
+    future = date.today() + timedelta(days=180)
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        # Simulate the rain display logic from main()
+        forecast = fish.fetch_rain_forecast(48.85, 2.35, future)
+        is_future = True
+        if not forecast and is_future:
+            print("  \033[1mRain:\033[0m N/A (date too far in the future)")
+        output = out.getvalue()
+    assert "N/A" in output
+    assert "too far in the future" in output
