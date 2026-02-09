@@ -359,13 +359,14 @@ def test_prepopulate_cache_handles_api_errors(mock_fetch):
 
 def test_display_table_output():
     rows = [
-        ("La Loue", "Station A", 854.0, 862.0, 10),
-        ("Le Doubs", "Station B", None, None, 0),
+        ("La Loue", "Station A", "X001", 854.0, 862.0, 10),
+        ("Le Doubs", "Station B", "X002", None, None, 0),
     ]
     with patch("sys.stdout", new_callable=StringIO) as out:
         fish.display_table(rows)
         output = out.getvalue()
     assert "La Loue" in output
+    assert "X001" in output
     assert "854 mm" in output
     assert "862 mm" in output
     assert "— mm" in output

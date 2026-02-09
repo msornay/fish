@@ -259,39 +259,41 @@ def get_historical_average(
     return None, 0
 
 
-def display_table(rows: list[tuple[str, str, float | None, float | None, int]]) -> None:
+def display_table(
+    rows: list[tuple[str, str, str, float | None, float | None, int]],
+) -> None:
     """Print a table of station data."""
     BOLD = "\033[1m"
+    DIM = "\033[2m"
     RESET = "\033[0m"
 
-    headers = ("River", "Station", "Today", "10y avg")
+    headers = ("River", "Station", "Code", "Today", "10y avg")
+    ra = (False, False, False, True, True)
     # Compute column widths
     fmt_rows = []
-    for river, name, today_val, avg_val, avg_count in rows:
+    for river, name, code, today_val, avg_val, avg_count in rows:
         today_s = f"{today_val:.0f} mm" if today_val is not None else "— mm"
         if avg_val is not None:
             avg_s = f"{avg_val:.0f} mm ({avg_count}y)"
         else:
             avg_s = "—"
-        fmt_rows.append((river, name, today_s, avg_s))
+        fmt_rows.append((river, name, code, today_s, avg_s))
 
     col_w = [len(h) for h in headers]
     for r in fmt_rows:
         for i, cell in enumerate(r):
             col_w[i] = max(col_w[i], len(cell))
 
-    def row_str(
-        cells: tuple[str, ...], right_align: tuple[bool, ...] = (False,) * 4
-    ) -> str:
+    def row_str(cells: tuple[str, ...], right_align: tuple[bool, ...] = ra) -> str:
         parts = []
-        for cell, w, ra in zip(cells, col_w, right_align):
-            parts.append(cell.rjust(w) if ra else cell.ljust(w))
+        for cell, w, r in zip(cells, col_w, right_align):
+            parts.append(cell.rjust(w) if r else cell.ljust(w))
         return "  ".join(parts)
 
-    print(f"  {BOLD}{row_str(headers, (False, False, True, True))}{RESET}")
+    print(f"  {BOLD}{row_str(headers)}{RESET}")
     print(f"  {'─' * (sum(col_w) + 2 * (len(col_w) - 1))}")
-    for river, name, today_s, avg_s in fmt_rows:
-        r_str = row_str((river, name, today_s, avg_s), (False, False, True, True))
+    for river, name, code, today_s, avg_s in fmt_rows:
+        r_str = row_str((river, name, f"{DIM}{code}{RESET}", today_s, avg_s))
         print(f"  {r_str}")
     print()
 
@@ -512,7 +514,7 @@ def main() -> None:
             avg_val, avg_count = get_historical_average(code, grandeur, cache)
         else:
             avg_val, avg_count = None, 0
-        rows.append((river, name, today_val, avg_val, avg_count))
+        rows.append((river, name, code, today_val, avg_val, avg_count))
 
     display_table(rows)
     save_cache(cache)
