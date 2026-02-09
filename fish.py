@@ -62,7 +62,9 @@ def get_station_info(code: str) -> dict:
     return data[0]
 
 
-def fetch_obs_elab(code: str, date_min: str, date_max: str, grandeur: str | None = None) -> list[dict]:
+def fetch_obs_elab(
+    code: str, date_min: str, date_max: str, grandeur: str | None = None
+) -> list[dict]:
     """Fetch elaborated observations for a date range."""
     results = []
     cursor = None
@@ -116,7 +118,12 @@ def fetch_recent_3months(code: str) -> tuple[list[str], list[float], str]:
     if not grandeur:
         return [], [], ""
 
-    height_obs = [o for o in obs if o.get("grandeur_hydro_elab") == grandeur and o.get("resultat_obs_elab") is not None]
+    height_obs = [
+        o
+        for o in obs
+        if o.get("grandeur_hydro_elab") == grandeur
+        and o.get("resultat_obs_elab") is not None
+    ]
     height_obs.sort(key=lambda o: o["date_obs_elab"])
 
     dates = [o["date_obs_elab"] for o in height_obs]
@@ -127,7 +134,6 @@ def fetch_recent_3months(code: str) -> tuple[list[str], list[float], str]:
 def fetch_historical_average(code: str, grandeur: str) -> tuple[float | None, int]:
     """Fetch today's date across the past 10 years, return average height and count."""
     today = date.today()
-    target_mmdd = today.strftime("%m-%d")
     values = []
     # Fetch year by year (API doesn't support multi-year ranges well)
     for year_offset in range(1, 11):
@@ -145,7 +151,61 @@ def fetch_historical_average(code: str, grandeur: str) -> tuple[float | None, in
     return sum(values) / len(values), len(values)
 
 
-def display(station: dict, dates: list[str], values: list[float], avg: float | None, avg_count: int) -> None:
+def display_station_info(station: dict) -> None:
+    """Display station metadata in a box."""
+    BOLD = "\033[1m"
+    CYAN = "\033[36m"
+    GREEN = "\033[32m"
+    RESET = "\033[0m"
+
+    name = station.get("libelle_station", "?")
+    river = station.get("libelle_cours_eau", "?")
+    code = station["code_station"]
+
+    fields = [
+        ("Station", name),
+        ("Code", code),
+        ("River", river),
+        (
+            "Coordinates",
+            f"{station.get('latitude_station', '?')}, {station.get('longitude_station', '?')}",
+        ),
+        (
+            "Altitude",
+            f"{station.get('altitude_ref_alti_station', '?')} m"
+            if station.get("altitude_ref_alti_station") is not None
+            else "?",
+        ),
+        ("Status", "Active" if station.get("en_service") else "Inactive"),
+        ("Département", station.get("code_departement", "?")),
+    ]
+
+    max_label = max(len(f[0]) for f in fields)
+    max_value = max(len(str(f[1])) for f in fields)
+    box_width = max_label + max_value + 7
+
+    print(f"{CYAN}┌{'─' * box_width}┐{RESET}")
+    title = f"{river} à {name}"
+    print(
+        f"{CYAN}│{RESET}  {BOLD}{CYAN}{title}{RESET}{' ' * (box_width - len(title) - 2)}{CYAN}│{RESET}"
+    )
+    print(f"{CYAN}├{'─' * box_width}┤{RESET}")
+    for label, value in fields:
+        line = f"{GREEN}{label:<{max_label}}{RESET}  {value}"
+        visible_len = max_label + 2 + len(str(value))
+        print(
+            f"{CYAN}│{RESET}  {line}{' ' * (box_width - visible_len - 2)}{CYAN}│{RESET}"
+        )
+    print(f"{CYAN}└{'─' * box_width}┘{RESET}")
+
+
+def display(
+    station: dict,
+    dates: list[str],
+    values: list[float],
+    avg: float | None,
+    avg_count: int,
+) -> None:
     """Render the graph and summary."""
     name = station.get("libelle_station", "?")
     river = station.get("libelle_cours_eau", "?")
@@ -162,8 +222,12 @@ def display(station: dict, dates: list[str], values: list[float], avg: float | N
     code_line = f"[{code}]"
     box_width = max(len(title), len(code_line)) + 4
     print(f"{CYAN}┌{'─' * box_width}┐{RESET}")
-    print(f"{CYAN}│{RESET}  {BOLD}{CYAN}{title}{RESET}{' ' * (box_width - len(title) - 2)}{CYAN}│{RESET}")
-    print(f"{CYAN}│{RESET}  {GREEN}{code_line}{RESET}{' ' * (box_width - len(code_line) - 2)}{CYAN}│{RESET}")
+    print(
+        f"{CYAN}│{RESET}  {BOLD}{CYAN}{title}{RESET}{' ' * (box_width - len(title) - 2)}{CYAN}│{RESET}"
+    )
+    print(
+        f"{CYAN}│{RESET}  {GREEN}{code_line}{RESET}{' ' * (box_width - len(code_line) - 2)}{CYAN}│{RESET}"
+    )
     print(f"{CYAN}└{'─' * box_width}┘{RESET}")
 
     if dates and values:
@@ -192,19 +256,30 @@ def display(station: dict, dates: list[str], values: list[float], avg: float | N
     print()
     today = date.today()
     if avg is not None:
-        print(f"  {GREEN}>>{RESET} Today's average ({today.strftime('%b %d')}, {avg_count}-year): {BOLD}{GREEN}{avg:.0f} mm{RESET}")
+        print(
+            f"  {GREEN}>>{RESET} Today's average ({today.strftime('%b %d')}, {avg_count}-year): {BOLD}{GREEN}{avg:.0f} mm{RESET}"
+        )
     else:
-        print(f"  {GREEN}>>{RESET} No historical data available for {today.strftime('%b %d')}.")
+        print(
+            f"  {GREEN}>>{RESET} No historical data available for {today.strftime('%b %d')}."
+        )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="French river water height console tool")
+    parser = argparse.ArgumentParser(
+        description="French river water height console tool"
+    )
     parser.add_argument("station", nargs="?", help="Station code (e.g. F700000103)")
-    parser.add_argument("--list", metavar="QUERY", help="Search stations by name or river")
+    parser.add_argument(
+        "--station-list", metavar="QUERY", help="Search stations by name or river"
+    )
+    parser.add_argument(
+        "--station-info", action="store_true", help="Show station details only"
+    )
     args = parser.parse_args()
 
-    if args.list:
-        search_stations(args.list)
+    if args.station_list:
+        search_stations(args.station_list)
         return
 
     if not args.station:
@@ -212,8 +287,15 @@ def main() -> None:
         sys.exit(1)
 
     station = get_station_info(args.station)
+
+    if args.station_info:
+        display_station_info(station)
+        return
+
     dates, values, grandeur = fetch_recent_3months(args.station)
-    avg, avg_count = fetch_historical_average(args.station, grandeur) if grandeur else (None, 0)
+    avg, avg_count = (
+        fetch_historical_average(args.station, grandeur) if grandeur else (None, 0)
+    )
     display(station, dates, values, avg, avg_count)
 
 

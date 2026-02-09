@@ -10,6 +10,7 @@ import fish
 
 # --- pick_height_grandeur ---
 
+
 def test_pick_height_grandeur_prefers_hmn():
     obs = [{"grandeur_hydro_elab": "HmnJ"}, {"grandeur_hydro_elab": "HIXnJ"}]
     assert fish.pick_height_grandeur(obs) == "HmnJ"
@@ -35,6 +36,7 @@ def test_pick_height_grandeur_empty():
 
 
 # --- fetch_obs_elab ---
+
 
 def _mock_response(data, cursor=None):
     resp = MagicMock()
@@ -80,9 +82,14 @@ def test_fetch_obs_elab_omits_grandeur_when_none(mock_get):
 
 # --- search_stations ---
 
+
 @patch("fish.httpx.get")
 def test_search_stations_deduplicates(mock_get):
-    station = {"code_station": "A1", "libelle_station": "Foo", "libelle_cours_eau": "Bar"}
+    station = {
+        "code_station": "A1",
+        "libelle_station": "Foo",
+        "libelle_cours_eau": "Bar",
+    }
     resp = MagicMock()
     resp.json.return_value = {"data": [station]}
     resp.raise_for_status.return_value = None
@@ -106,6 +113,7 @@ def test_search_stations_no_results(mock_get):
 
 
 # --- get_station_info ---
+
 
 @patch("fish.httpx.get")
 def test_get_station_info_returns_first(mock_get):
@@ -131,11 +139,20 @@ def test_get_station_info_exits_when_not_found(mock_get):
 
 # --- fetch_recent_3months ---
 
+
 @patch("fish.fetch_obs_elab")
 def test_fetch_recent_3months_sorted(mock_fetch):
     mock_fetch.return_value = [
-        {"grandeur_hydro_elab": "HmnJ", "date_obs_elab": "2025-03-02", "resultat_obs_elab": 200},
-        {"grandeur_hydro_elab": "HmnJ", "date_obs_elab": "2025-03-01", "resultat_obs_elab": 100},
+        {
+            "grandeur_hydro_elab": "HmnJ",
+            "date_obs_elab": "2025-03-02",
+            "resultat_obs_elab": 200,
+        },
+        {
+            "grandeur_hydro_elab": "HmnJ",
+            "date_obs_elab": "2025-03-01",
+            "resultat_obs_elab": 100,
+        },
     ]
     dates, values, grandeur = fish.fetch_recent_3months("X")
     assert dates == ["2025-03-01", "2025-03-02"]
@@ -153,6 +170,7 @@ def test_fetch_recent_3months_no_data(mock_fetch):
 
 
 # --- fetch_historical_average ---
+
 
 @patch("fish.fetch_obs_elab")
 def test_fetch_historical_average_computes(mock_fetch):
