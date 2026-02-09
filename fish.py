@@ -304,9 +304,7 @@ def plot_station(station: dict) -> None:
     """Fetch data and display plot for a single station."""
     code = station["code_station"]
     dates, values, grandeur = fetch_recent_3months(code)
-    avg, avg_count = (
-        fetch_historical_average(code, grandeur) if grandeur else (None, 0)
-    )
+    avg, avg_count = fetch_historical_average(code, grandeur) if grandeur else (None, 0)
     display(station, dates, values, avg, avg_count)
 
 
@@ -314,9 +312,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="French river water height console tool"
     )
-    parser.add_argument(
-        "location", nargs="?", help="Location name (e.g. Paris, Lyon)"
-    )
+    parser.add_argument("location", nargs="?", help="Location name (e.g. Paris, Lyon)")
     parser.add_argument(
         "--station", metavar="CODE", help="Plot a specific station by code"
     )
