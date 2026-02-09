@@ -174,7 +174,8 @@ def fetch_recent_3months(
     code: str, target_date: date | None = None
 ) -> tuple[list[str], list[float], str]:
     """Fetch last 3 months of daily water height. Returns (dates, values, grandeur_used)."""
-    end = min(target_date or date.today(), date.today())
+    today = date.today()
+    end = min(target_date or today, today)
     date_min = (end - timedelta(days=90)).isoformat()
     date_max = end.isoformat()
 

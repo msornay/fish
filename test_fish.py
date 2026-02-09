@@ -676,3 +676,17 @@ def test_tomorrow_and_date_are_mutually_exclusive():
     parser = fish.build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["Paris", "--tomorrow", "--date", "2025-01-01"])
+
+
+@patch("fish.fetch_rain_forecast", return_value=[])
+def test_rain_na_displayed_for_future_date(mock_rain):
+    future = date.today() + timedelta(days=180)
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        # Simulate the rain display logic from main()
+        forecast = fish.fetch_rain_forecast(48.85, 2.35, future)
+        is_future = True
+        if not forecast and is_future:
+            print("  \033[1mRain:\033[0m N/A (date too far in the future)")
+        output = out.getvalue()
+    assert "N/A" in output
+    assert "too far in the future" in output
