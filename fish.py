@@ -299,7 +299,7 @@ def display_table(
     RESET = "\033[0m"
 
     ref = target_date or date.today()
-    date_label = "Today" if ref == date.today() else ref.strftime("%b %d")
+    date_label = "Today" if ref >= date.today() else ref.strftime("%b %d")
     headers = ("River", "Station", "Code", date_label, "10y avg")
     ra = (False, False, False, True, True)
     # Compute column widths
@@ -585,7 +585,7 @@ def main() -> None:
         name = station.get("libelle_station") or "?"
         river = station.get("libelle_cours_eau") or "?"
         try:
-            if target_date is None or target_date == date.today():
+            if target_date is None or target_date >= date.today():
                 today_val = fetch_today_level(code)
             else:
                 today_val = fetch_date_level(code, target_date)
