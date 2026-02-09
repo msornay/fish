@@ -3,7 +3,7 @@
 
 import argparse
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import httpx
 import plotext as plt
@@ -208,6 +208,37 @@ def fetch_rain_forecast(lat: float, lon: float) -> list[tuple[str, float]]:
         return []
 
 
+def fetch_sunlight(lat: float, lon: float) -> dict | None:
+    """Fetch sunrise/sunset from Open-Meteo. Returns dict with times or None."""
+    try:
+        resp = httpx.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "sunrise,sunset",
+                "timezone": "auto",
+                "forecast_days": 1,
+            },
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        daily = resp.json().get("daily", {})
+        sunrise = daily["sunrise"][0]
+        sunset = daily["sunset"][0]
+        sr = datetime.fromisoformat(sunrise)
+        ss = datetime.fromisoformat(sunset)
+        noon = sr + (ss - sr) / 2
+        return {
+            "sunrise": sr.strftime("%H:%M"),
+            "sunset": ss.strftime("%H:%M"),
+            "peak_start": (noon - timedelta(hours=2)).strftime("%H:%M"),
+            "peak_end": (noon + timedelta(hours=2)).strftime("%H:%M"),
+        }
+    except Exception:
+        return None
+
+
 def display_station_info(station: dict) -> None:
     """Display station metadata in a box."""
     BOLD = "\033[1m"
@@ -264,6 +295,18 @@ def display_station_info(station: dict) -> None:
         for hour, mm in forecast:
             bar = "▇" * round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else ""
             print(f"  {hour}  {mm:4.1f} mm  {CYAN}{bar}{RESET}")
+
+    sun = fetch_sunlight(
+        station.get("latitude_station", 0), station.get("longitude_station", 0)
+    )
+    if sun:
+        YELLOW = "\033[33m"
+        print(f"\n  {BOLD}Sunlight:{RESET}")
+        print(f"  {YELLOW}☀{RESET}  Sunrise       {sun['sunrise']}")
+        print(f"  {YELLOW}☀{RESET}  Sunset        {sun['sunset']}")
+        print(
+            f"  {YELLOW}☀{RESET}  Peak sunlight {sun['peak_start']} – {sun['peak_end']}"
+        )
 
 
 def display(
