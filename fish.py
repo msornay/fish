@@ -154,11 +154,29 @@ def pick_height_grandeur(obs: list[dict]) -> str | None:
     return None
 
 
-def fetch_recent_3months(code: str) -> tuple[list[str], list[float], str]:
+def fetch_date_level(code: str, target_date: date) -> float | None:
+    """Fetch the elaborated daily water height for a specific date."""
+    d = target_date.isoformat()
+    obs = fetch_obs_elab(code, d, d)
+    grandeur = pick_height_grandeur(obs)
+    if not grandeur:
+        return None
+    for o in obs:
+        if (
+            o.get("grandeur_hydro_elab") == grandeur
+            and o.get("resultat_obs_elab") is not None
+        ):
+            return o["resultat_obs_elab"]
+    return None
+
+
+def fetch_recent_3months(
+    code: str, target_date: date | None = None
+) -> tuple[list[str], list[float], str]:
     """Fetch last 3 months of daily water height. Returns (dates, values, grandeur_used)."""
-    today = date.today()
-    date_min = (today - timedelta(days=90)).isoformat()
-    date_max = today.isoformat()
+    end = target_date or date.today()
+    date_min = (end - timedelta(days=90)).isoformat()
+    date_max = end.isoformat()
 
     obs = fetch_obs_elab(code, date_min, date_max)
     grandeur = pick_height_grandeur(obs)
@@ -178,14 +196,16 @@ def fetch_recent_3months(code: str) -> tuple[list[str], list[float], str]:
     return dates, values, grandeur
 
 
-def fetch_historical_average(code: str, grandeur: str) -> tuple[float | None, int]:
-    """Fetch today's date across the past 10 years, return average height and count."""
-    today = date.today()
+def fetch_historical_average(
+    code: str, grandeur: str, target_date: date | None = None
+) -> tuple[float | None, int]:
+    """Fetch target date across the past 10 years, return average height and count."""
+    ref = target_date or date.today()
     values = []
     # Fetch year by year (API doesn't support multi-year ranges well)
     for year_offset in range(1, 11):
         try:
-            target = today.replace(year=today.year - year_offset)
+            target = ref.replace(year=ref.year - year_offset)
         except ValueError:
             continue  # Feb 29 in non-leap year
         d = target.isoformat()
@@ -216,19 +236,21 @@ def save_cache(cache: dict) -> None:
     CACHE_PATH.write_text(json.dumps(cache))
 
 
-def prepopulate_cache(code: str, grandeur: str, cache: dict) -> None:
-    """Fetch 3 months of historical averages (today+90d) across 10 years, store in cache."""
-    today = date.today()
-    end = today + timedelta(days=90)
+def prepopulate_cache(
+    code: str, grandeur: str, cache: dict, target_date: date | None = None
+) -> None:
+    """Fetch 3 months of historical averages centered on target_date across 10 years, store in cache."""
+    ref = target_date or date.today()
+    end = ref + timedelta(days=90)
     by_day: dict[str, list[float]] = defaultdict(list)
 
     for year_offset in range(1, 11):
         try:
-            d_min = today.replace(year=today.year - year_offset)
-            d_max = end.replace(year=today.year - year_offset)
+            d_min = ref.replace(year=ref.year - year_offset)
+            d_max = end.replace(year=ref.year - year_offset)
         except ValueError:
             continue
-        year = today.year - year_offset
+        year = ref.year - year_offset
         print(
             f"  Caching {code} {grandeur} [{year_offset}/10] {year}...",
             end="\r",
@@ -253,13 +275,14 @@ def prepopulate_cache(code: str, grandeur: str, cache: dict) -> None:
 
 
 def get_historical_average(
-    code: str, grandeur: str, cache: dict
+    code: str, grandeur: str, cache: dict, target_date: date | None = None
 ) -> tuple[float | None, int]:
     """Get cached historical average, prepopulating on miss."""
-    md = date.today().strftime("%m-%d")
+    ref = target_date or date.today()
+    md = ref.strftime("%m-%d")
     key = f"{code}:{md}:{grandeur}"
     if key not in cache["data"]:
-        prepopulate_cache(code, grandeur, cache)
+        prepopulate_cache(code, grandeur, cache, target_date)
     entry = cache["data"].get(key)
     if entry:
         return entry[0], entry[1]
@@ -268,13 +291,16 @@ def get_historical_average(
 
 def display_table(
     rows: list[tuple[str, str, str, float | None, float | None, int]],
+    target_date: date | None = None,
 ) -> None:
     """Print a table of station data."""
     BOLD = "\033[1m"
     DIM = "\033[2m"
     RESET = "\033[0m"
 
-    headers = ("River", "Station", "Code", "Today", "10y avg")
+    ref = target_date or date.today()
+    date_label = "Today" if ref == date.today() else ref.strftime("%b %d")
+    headers = ("River", "Station", "Code", date_label, "10y avg")
     ra = (False, False, False, True, True)
     # Compute column widths
     fmt_rows = []
@@ -307,19 +333,47 @@ def display_table(
     print()
 
 
-def fetch_rain_forecast(lat: float, lon: float) -> list[tuple[str, float]]:
-    """Fetch 8-hour rain forecast from Open-Meteo. Returns list of (hour_label, mm)."""
+def fetch_rain_forecast(
+    lat: float, lon: float, target_date: date | None = None
+) -> list[tuple[str, float]]:
+    """Fetch rain data from Open-Meteo. For today: next 8h forecast. For past: archive. For future: forecast."""
+    ref = target_date or date.today()
     try:
-        resp = httpx.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "hourly": "precipitation",
-                "forecast_hours": 8,
-            },
-            timeout=TIMEOUT,
-        )
+        if ref == date.today():
+            resp = httpx.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "hourly": "precipitation",
+                    "forecast_hours": 8,
+                },
+                timeout=TIMEOUT,
+            )
+        elif ref < date.today():
+            resp = httpx.get(
+                "https://archive-api.open-meteo.com/v1/archive",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "hourly": "precipitation",
+                    "start_date": ref.isoformat(),
+                    "end_date": ref.isoformat(),
+                },
+                timeout=TIMEOUT,
+            )
+        else:
+            resp = httpx.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "hourly": "precipitation",
+                    "start_date": ref.isoformat(),
+                    "end_date": ref.isoformat(),
+                },
+                timeout=TIMEOUT,
+            )
         resp.raise_for_status()
         data = resp.json().get("hourly", {})
         times = data.get("time", [])
@@ -329,8 +383,11 @@ def fetch_rain_forecast(lat: float, lon: float) -> list[tuple[str, float]]:
         return []
 
 
-def fetch_sunlight(lat: float, lon: float) -> dict | None:
+def fetch_sunlight(
+    lat: float, lon: float, target_date: date | None = None
+) -> dict | None:
     """Fetch sunrise/sunset from Open-Meteo. Returns dict with times or None."""
+    ref = target_date or date.today()
     try:
         resp = httpx.get(
             "https://api.open-meteo.com/v1/forecast",
@@ -339,7 +396,8 @@ def fetch_sunlight(lat: float, lon: float) -> dict | None:
                 "longitude": lon,
                 "daily": "sunrise,sunset",
                 "timezone": "auto",
-                "forecast_days": 1,
+                "start_date": ref.isoformat(),
+                "end_date": ref.isoformat(),
             },
             timeout=TIMEOUT,
         )
@@ -366,6 +424,7 @@ def display(
     values: list[float],
     avg: float | None,
     avg_count: int,
+    target_date: date | None = None,
 ) -> None:
     """Render the graph and summary."""
     name = station.get("libelle_station", "?")
@@ -415,15 +474,14 @@ def display(
         print(f"  {GREEN}No recent data available for this station.{RESET}")
 
     print()
-    today = date.today()
+    ref = target_date or date.today()
+    label = ref.strftime("%b %d")
     if avg is not None:
         print(
-            f"  {GREEN}>>{RESET} Today's average ({today.strftime('%b %d')}, {avg_count}-year): {BOLD}{GREEN}{avg:.0f} mm{RESET}"
+            f"  {GREEN}>>{RESET} Historical average ({label}, {avg_count}-year): {BOLD}{GREEN}{avg:.0f} mm{RESET}"
         )
     else:
-        print(
-            f"  {GREEN}>>{RESET} No historical data available for {today.strftime('%b %d')}."
-        )
+        print(f"  {GREEN}>>{RESET} No historical data available for {label}.")
 
 
 def fetch_today_level(code: str) -> float | None:
@@ -446,13 +504,15 @@ def fetch_today_level(code: str) -> float | None:
     return None
 
 
-def plot_station(station: dict) -> None:
+def plot_station(station: dict, target_date: date | None = None) -> None:
     """Fetch data and display plot for a single station."""
     code = station["code_station"]
     try:
-        dates, values, grandeur = fetch_recent_3months(code)
+        dates, values, grandeur = fetch_recent_3months(code, target_date)
         avg, avg_count = (
-            fetch_historical_average(code, grandeur) if grandeur else (None, 0)
+            fetch_historical_average(code, grandeur, target_date)
+            if grandeur
+            else (None, 0)
         )
     except httpx.HTTPStatusError as e:
         name = station.get("libelle_station", code)
@@ -461,7 +521,7 @@ def plot_station(station: dict) -> None:
             file=sys.stderr,
         )
         return
-    display(station, dates, values, avg, avg_count)
+    display(station, dates, values, avg, avg_count, target_date)
 
 
 def main() -> None:
@@ -475,15 +535,24 @@ def main() -> None:
     parser.add_argument(
         "--station-list", metavar="QUERY", help="Search stations by name or river"
     )
+    parser.add_argument(
+        "--date",
+        metavar="YYYY-MM-DD",
+        type=date.fromisoformat,
+        default=None,
+        help="Date to display data for (default: today)",
+    )
     args = parser.parse_args()
 
     if args.station_list:
         search_stations(args.station_list)
         return
 
+    target_date = args.date
+
     if args.station:
         station = get_station_info(args.station)
-        plot_station(station)
+        plot_station(station, target_date)
         return
 
     if not args.location:
@@ -507,7 +576,10 @@ def main() -> None:
         name = station.get("libelle_station") or "?"
         river = station.get("libelle_cours_eau") or "?"
         try:
-            today_val = fetch_today_level(code)
+            if target_date is None or target_date == date.today():
+                today_val = fetch_today_level(code)
+            else:
+                today_val = fetch_date_level(code, target_date)
         except (httpx.HTTPStatusError, httpx.TimeoutException):
             print(
                 f"  {DIM}{river} à {name} ({code}): unavailable{RESET}",
@@ -516,16 +588,18 @@ def main() -> None:
             continue
         # Pick grandeur from recent data for historical average
         try:
-            _, _, grandeur = fetch_recent_3months(code)
+            _, _, grandeur = fetch_recent_3months(code, target_date)
         except (httpx.HTTPStatusError, httpx.TimeoutException):
             grandeur = ""
         if grandeur:
-            avg_val, avg_count = get_historical_average(code, grandeur, cache)
+            avg_val, avg_count = get_historical_average(
+                code, grandeur, cache, target_date
+            )
         else:
             avg_val, avg_count = None, 0
         rows.append((river, name, code, today_val, avg_val, avg_count))
 
-    display_table(rows)
+    display_table(rows, target_date)
     save_cache(cache)
 
     # Weather and sunlight for the searched location
@@ -534,16 +608,18 @@ def main() -> None:
     YELLOW = "\033[33m"
     RESET = "\033[0m"
 
-    forecast = fetch_rain_forecast(lat, lon)
+    forecast = fetch_rain_forecast(lat, lon, target_date)
+    is_today = target_date is None or target_date == date.today()
     if forecast:
-        print(f"  {BOLD}Rain forecast (next 8h):{RESET}")
+        rain_label = "Rain forecast (next 8h)" if is_today else "Rain"
+        print(f"  {BOLD}{rain_label}:{RESET}")
         max_mm = max(mm for _, mm in forecast)
         for hour, mm in forecast:
             bar = "▇" * round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else ""
             print(f"  {hour}  {mm:4.1f} mm  {CYAN}{bar}{RESET}")
         print()
 
-    sun = fetch_sunlight(lat, lon)
+    sun = fetch_sunlight(lat, lon, target_date)
     if sun:
         print(f"  {BOLD}Sunlight:{RESET}")
         print(f"  {YELLOW}☀{RESET}  Sunrise       {sun['sunrise']}")
