@@ -174,7 +174,7 @@ def fetch_recent_3months(
     code: str, target_date: date | None = None
 ) -> tuple[list[str], list[float], str]:
     """Fetch last 3 months of daily water height. Returns (dates, values, grandeur_used)."""
-    end = target_date or date.today()
+    end = min(target_date or date.today(), date.today())
     date_min = (end - timedelta(days=90)).isoformat()
     date_max = end.isoformat()
 
@@ -389,7 +389,7 @@ def fetch_rain_forecast(
 def fetch_sunlight(
     lat: float, lon: float, target_date: date | None = None
 ) -> dict | None:
-    """Fetch sunrise/sunset from Open-Meteo. Returns dict with times or None."""
+    """Fetch sunrise/sunset from Open-Meteo. Falls back to same date last year for far-future dates."""
     ref = target_date or date.today()
     try:
         resp = httpx.get(
@@ -404,6 +404,24 @@ def fetch_sunlight(
             },
             timeout=TIMEOUT,
         )
+        if resp.status_code == 400 and ref > date.today():
+            # Date beyond forecast range — use same date last year via archive API
+            try:
+                fallback = ref.replace(year=ref.year - 1)
+            except ValueError:
+                fallback = ref.replace(year=ref.year - 1, day=28)
+            resp = httpx.get(
+                "https://archive-api.open-meteo.com/v1/archive",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "daily": "sunrise,sunset",
+                    "timezone": "auto",
+                    "start_date": fallback.isoformat(),
+                    "end_date": fallback.isoformat(),
+                },
+                timeout=TIMEOUT,
+            )
         resp.raise_for_status()
         daily = resp.json().get("daily", {})
         sunrise = daily["sunrise"][0]
@@ -619,6 +637,7 @@ def main() -> None:
 
     forecast = fetch_rain_forecast(lat, lon, target_date)
     is_today = target_date is None or target_date == date.today()
+    is_future = target_date is not None and target_date > date.today()
     if forecast:
         rain_label = "Rain forecast (next 8h)" if is_today else "Rain"
         print(f"  {BOLD}{rain_label}:{RESET}")
@@ -626,6 +645,9 @@ def main() -> None:
         for hour, mm in forecast:
             bar = "▇" * round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else ""
             print(f"  {hour}  {mm:4.1f} mm  {CYAN}{bar}{RESET}")
+        print()
+    elif is_future:
+        print(f"  {BOLD}Rain:{RESET} N/A (date too far in the future)")
         print()
 
     sun = fetch_sunlight(lat, lon, target_date)
