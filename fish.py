@@ -239,7 +239,7 @@ def save_cache(cache: dict) -> None:
 def prepopulate_cache(
     code: str, grandeur: str, cache: dict, target_date: date | None = None
 ) -> None:
-    """Fetch 3 months of historical averages centered on target_date across 10 years, store in cache."""
+    """Fetch 3 months of historical averages starting at target_date across 10 years, store in cache."""
     ref = target_date or date.today()
     end = ref + timedelta(days=90)
     by_day: dict[str, list[float]] = defaultdict(list)
@@ -347,6 +347,7 @@ def fetch_rain_forecast(
                     "longitude": lon,
                     "hourly": "precipitation",
                     "forecast_hours": 8,
+                    "timezone": "auto",
                 },
                 timeout=TIMEOUT,
             )
@@ -359,6 +360,7 @@ def fetch_rain_forecast(
                     "hourly": "precipitation",
                     "start_date": ref.isoformat(),
                     "end_date": ref.isoformat(),
+                    "timezone": "auto",
                 },
                 timeout=TIMEOUT,
             )
@@ -371,6 +373,7 @@ def fetch_rain_forecast(
                     "hourly": "precipitation",
                     "start_date": ref.isoformat(),
                     "end_date": ref.isoformat(),
+                    "timezone": "auto",
                 },
                 timeout=TIMEOUT,
             )
@@ -475,10 +478,16 @@ def display(
 
     print()
     ref = target_date or date.today()
+    is_today = ref == date.today()
     label = ref.strftime("%b %d")
     if avg is not None:
+        avg_label = (
+            f"Today's average ({label},"
+            if is_today
+            else f"Historical average ({label},"
+        )
         print(
-            f"  {GREEN}>>{RESET} Historical average ({label}, {avg_count}-year): {BOLD}{GREEN}{avg:.0f} mm{RESET}"
+            f"  {GREEN}>>{RESET} {avg_label} {avg_count}-year): {BOLD}{GREEN}{avg:.0f} mm{RESET}"
         )
     else:
         print(f"  {GREEN}>>{RESET} No historical data available for {label}.")
