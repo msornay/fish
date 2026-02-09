@@ -1,6 +1,8 @@
 """Tests for fish.py."""
 
+import json
 from unittest.mock import patch, MagicMock
+from datetime import date
 from io import StringIO
 
 import pytest
@@ -186,3 +188,266 @@ def test_fetch_historical_average_no_data(mock_fetch):
     avg, count = fish.fetch_historical_average("X", "HmnJ")
     assert avg is None
     assert count == 0
+
+
+# --- geocode ---
+
+
+def _mock_geocode_response(features):
+    resp = MagicMock()
+    resp.json.return_value = {"features": features}
+    resp.raise_for_status.return_value = None
+    return resp
+
+
+@patch("fish.httpx.get")
+def test_geocode_returns_lat_lon(mock_get):
+    mock_get.return_value = _mock_geocode_response(
+        [{"geometry": {"coordinates": [2.35, 48.85]}}]
+    )
+    lat, lon = fish.geocode("Paris")
+    assert lat == 48.85
+    assert lon == 2.35
+
+
+@patch("fish.httpx.get")
+def test_geocode_exits_when_not_found(mock_get):
+    mock_get.return_value = _mock_geocode_response([])
+    with pytest.raises(SystemExit):
+        fish.geocode("nonexistent")
+
+
+# --- search_stations_nearby ---
+
+
+@patch("fish.httpx.get")
+def test_search_stations_nearby_returns_data(mock_get):
+    stations = [{"code_station": "S1"}, {"code_station": "S2"}]
+    mock_get.return_value = _mock_response(stations)
+    result = fish.search_stations_nearby(48.85, 2.35, 25)
+    assert len(result) == 2
+    params = mock_get.call_args[1]["params"]
+    assert params["distance"] == 25
+
+
+@patch("fish.httpx.get")
+def test_search_stations_nearby_paginates(mock_get):
+    mock_get.side_effect = [
+        _mock_response([{"code_station": "S1"}], cursor="abc"),
+        _mock_response([{"code_station": "S2"}]),
+    ]
+    result = fish.search_stations_nearby(48.85, 2.35, 25)
+    assert len(result) == 2
+    assert mock_get.call_count == 2
+
+
+@patch("fish.httpx.get")
+def test_search_stations_nearby_empty(mock_get):
+    mock_get.return_value = _mock_response([])
+    result = fish.search_stations_nearby(48.85, 2.35, 25)
+    assert result == []
+
+
+# --- fetch_rain_forecast ---
+
+
+@patch("fish.httpx.get")
+def test_fetch_rain_forecast_parses_response(mock_get):
+    resp = MagicMock()
+    resp.json.return_value = {
+        "hourly": {
+            "time": ["2025-03-01T10:00", "2025-03-01T11:00"],
+            "precipitation": [0.5, 1.2],
+        }
+    }
+    resp.raise_for_status.return_value = None
+    mock_get.return_value = resp
+    result = fish.fetch_rain_forecast(48.85, 2.35)
+    assert result == [("10:00", 0.5), ("11:00", 1.2)]
+
+
+@patch("fish.httpx.get")
+def test_fetch_rain_forecast_returns_empty_on_error(mock_get):
+    mock_get.side_effect = Exception("network error")
+    result = fish.fetch_rain_forecast(48.85, 2.35)
+    assert result == []
+
+
+# --- plot_station ---
+
+
+@patch("fish.display")
+@patch("fish.fetch_historical_average", return_value=(150.0, 5))
+@patch(
+    "fish.fetch_recent_3months",
+    return_value=(["2025-03-01"], [100], "HmnJ"),
+)
+def test_plot_station_calls_display(mock_recent, mock_avg, mock_display):
+    station = {"code_station": "X1"}
+    fish.plot_station(station)
+    mock_recent.assert_called_once_with("X1")
+    mock_avg.assert_called_once_with("X1", "HmnJ")
+    mock_display.assert_called_once_with(station, ["2025-03-01"], [100], 150.0, 5)
+
+
+@patch("fish.display")
+@patch("fish.fetch_recent_3months", return_value=([], [], ""))
+def test_plot_station_no_grandeur_skips_avg(mock_recent, mock_display):
+    station = {"code_station": "X1"}
+    fish.plot_station(station)
+    mock_display.assert_called_once_with(station, [], [], None, 0)
+
+
+# --- cache ---
+
+
+def test_load_cache_missing_file(tmp_path):
+    with patch.object(fish, "CACHE_PATH", tmp_path / "nope.json"):
+        cache = fish.load_cache()
+    assert cache["year"] == date.today().year
+    assert cache["data"] == {}
+
+
+def test_load_cache_wrong_year(tmp_path):
+    p = tmp_path / "hist_avg.json"
+    p.write_text(json.dumps({"year": 1999, "data": {"k": [1, 2]}}))
+    with patch.object(fish, "CACHE_PATH", p):
+        cache = fish.load_cache()
+    assert cache["data"] == {}
+
+
+def test_load_cache_valid(tmp_path):
+    p = tmp_path / "hist_avg.json"
+    data = {"year": date.today().year, "data": {"X:01-01:HmnJ": [100.0, 5]}}
+    p.write_text(json.dumps(data))
+    with patch.object(fish, "CACHE_PATH", p):
+        cache = fish.load_cache()
+    assert cache["data"]["X:01-01:HmnJ"] == [100.0, 5]
+
+
+def test_save_cache_creates_dirs(tmp_path):
+    p = tmp_path / "sub" / "dir" / "hist_avg.json"
+    with patch.object(fish, "CACHE_PATH", p):
+        fish.save_cache({"year": 2026, "data": {}})
+    assert p.exists()
+    assert json.loads(p.read_text())["year"] == 2026
+
+
+# --- get_historical_average ---
+
+
+def test_get_historical_average_cache_hit():
+    today_md = date.today().strftime("%m-%d")
+    cache = {"year": 2026, "data": {f"X:{today_md}:HmnJ": [200.0, 7]}}
+    avg, count = fish.get_historical_average("X", "HmnJ", cache)
+    assert avg == 200.0
+    assert count == 7
+
+
+@patch("fish.fetch_obs_elab")
+@patch("fish.date")
+def test_get_historical_average_cache_miss_triggers_prepopulate(mock_date, mock_fetch):
+    fixed = date(2025, 3, 1)
+    mock_date.today.return_value = fixed
+    mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+    mock_fetch.return_value = [
+        {"date_obs_elab": fixed.isoformat(), "resultat_obs_elab": 300.0}
+    ]
+    cache = {"year": 2025, "data": {}}
+    avg, count = fish.get_historical_average("X", "HmnJ", cache)
+    assert avg == 300.0
+    assert count == 10  # 10 years, same value each
+    assert mock_fetch.call_count == 10
+
+
+@patch("fish.fetch_obs_elab")
+def test_prepopulate_cache_handles_api_errors(mock_fetch):
+    import httpx
+
+    mock_fetch.side_effect = httpx.TimeoutException("timeout")
+    cache = {"year": 2026, "data": {}}
+    fish.prepopulate_cache("X", "HmnJ", cache)
+    assert cache["data"] == {}
+
+
+# --- display_table ---
+
+
+def test_display_table_output():
+    rows = [
+        ("La Loue", "Station A", "X001", 854.0, 862.0, 10),
+        ("Le Doubs", "Station B", "X002", None, None, 0),
+    ]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.display_table(rows)
+        output = out.getvalue()
+    assert "La Loue" in output
+    assert "X001" in output
+    assert "854 mm" in output
+    assert "862 mm" in output
+    assert "— mm" in output
+
+
+# --- fetch_sunlight ---
+
+
+@patch("fish.httpx.get")
+def test_fetch_sunlight_parses_response(mock_get):
+    resp = MagicMock()
+    resp.json.return_value = {
+        "daily": {
+            "sunrise": ["2025-06-15T06:00"],
+            "sunset": ["2025-06-15T21:30"],
+        }
+    }
+    resp.raise_for_status.return_value = None
+    mock_get.return_value = resp
+    result = fish.fetch_sunlight(48.85, 2.35)
+    assert result["sunrise"] == "06:00"
+    assert result["sunset"] == "21:30"
+    assert "peak_start" in result
+    assert "peak_end" in result
+
+
+@patch("fish.httpx.get")
+def test_fetch_sunlight_returns_none_on_error(mock_get):
+    mock_get.side_effect = Exception("network error")
+    assert fish.fetch_sunlight(48.85, 2.35) is None
+
+
+# --- fetch_today_level ---
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_returns_value(mock_get):
+    mock_get.return_value = _mock_response([{"resultat_obs": 1234.0}])
+    assert fish.fetch_today_level("X1") == 1234.0
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_returns_none_when_empty(mock_get):
+    mock_get.return_value = _mock_response([])
+    assert fish.fetch_today_level("X1") is None
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_returns_none_when_no_result(mock_get):
+    mock_get.return_value = _mock_response([{"resultat_obs": None}])
+    assert fish.fetch_today_level("X1") is None
+
+
+# --- plot_station error handling ---
+
+
+@patch("fish.fetch_recent_3months")
+def test_plot_station_skips_on_http_error(mock_recent):
+    import httpx
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_recent.side_effect = httpx.HTTPStatusError(
+        "not found", request=MagicMock(), response=mock_resp
+    )
+    station = {"code_station": "X1", "libelle_station": "Test"}
+    # Should not raise, just print to stderr and return
+    fish.plot_station(station)
