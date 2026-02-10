@@ -659,12 +659,11 @@ def test_display_table_shows_today_for_future_date():
 
 def test_tomorrow_flag_sets_target_date():
     """--tomorrow should set target_date to tomorrow's date."""
-    tomorrow = date.today() + timedelta(days=1)
     parser = fish.build_parser()
     args = parser.parse_args(["Paris", "--tomorrow"])
     assert args.tomorrow is True
-    target_date = tomorrow if args.tomorrow else args.date
-    assert target_date == tomorrow
+    # When --tomorrow is used, no explicit date should be provided.
+    assert args.date is None
 
 
 def test_tomorrow_flag_default_is_false():
