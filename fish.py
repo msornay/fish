@@ -552,6 +552,26 @@ def plot_station(station: dict, target_date: date | None = None) -> None:
     display(station, dates, values, avg, avg_count, target_date)
 
 
+def print_rain_section(
+    forecast: list[tuple[str, float]], is_today: bool, is_future: bool
+) -> None:
+    """Print rain forecast section or N/A message."""
+    BOLD = "\033[1m"
+    CYAN = "\033[36m"
+    RESET = "\033[0m"
+    if forecast:
+        rain_label = "Rain forecast (next 8h)" if is_today else "Rain"
+        print(f"  {BOLD}{rain_label}:{RESET}")
+        max_mm = max(mm for _, mm in forecast)
+        for hour, mm in forecast:
+            bar = "▇" * round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else ""
+            print(f"  {hour}  {mm:4.1f} mm  {CYAN}{bar}{RESET}")
+        print()
+    elif is_future:
+        print(f"  {BOLD}Rain:{RESET} N/A (date too far in the future)")
+        print()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="French river water height console tool"
@@ -643,24 +663,13 @@ def main() -> None:
 
     # Weather and sunlight for the searched location
     BOLD = "\033[1m"
-    CYAN = "\033[36m"
     YELLOW = "\033[33m"
     RESET = "\033[0m"
 
     forecast = fetch_rain_forecast(lat, lon, target_date)
     is_today = target_date is None or target_date == date.today()
     is_future = target_date is not None and target_date > date.today()
-    if forecast:
-        rain_label = "Rain forecast (next 8h)" if is_today else "Rain"
-        print(f"  {BOLD}{rain_label}:{RESET}")
-        max_mm = max(mm for _, mm in forecast)
-        for hour, mm in forecast:
-            bar = "▇" * round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else ""
-            print(f"  {hour}  {mm:4.1f} mm  {CYAN}{bar}{RESET}")
-        print()
-    elif is_future:
-        print(f"  {BOLD}Rain:{RESET} N/A (date too far in the future)")
-        print()
+    print_rain_section(forecast, is_today, is_future)
 
     sun = fetch_sunlight(lat, lon, target_date)
     if sun:
