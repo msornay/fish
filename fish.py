@@ -17,6 +17,14 @@ BASE = "https://hubeau.eaufrance.fr/api/v2/hydrometrie"
 GEOCODE_URL = "https://api-adresse.data.gouv.fr/search/"
 TIMEOUT = 30
 
+# ANSI escape codes
+BOLD = "\033[1m"
+DIM = "\033[2m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+RESET = "\033[0m"
+
 
 def geocode(location: str) -> tuple[float, float]:
     """Geocode a location name using the French address API. Returns (lat, lon)."""
@@ -174,7 +182,8 @@ def fetch_recent_3months(
     code: str, target_date: date | None = None
 ) -> tuple[list[str], list[float], str]:
     """Fetch last 3 months of daily water height. Returns (dates, values, grandeur_used)."""
-    end = min(target_date or date.today(), date.today())
+    today = date.today()
+    end = min(target_date or today, today)
     date_min = (end - timedelta(days=90)).isoformat()
     date_max = end.isoformat()
 
@@ -294,10 +303,6 @@ def display_table(
     target_date: date | None = None,
 ) -> None:
     """Print a table of station data."""
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    RESET = "\033[0m"
-
     ref = target_date or date.today()
     date_label = "Today" if ref >= date.today() else ref.strftime("%b %d")
     headers = ("River", "Station", "Code", date_label, "10y avg")
@@ -452,12 +457,6 @@ def display(
     river = station.get("libelle_cours_eau", "?")
     code = station["code_station"]
 
-    # ANSI escape codes
-    BOLD = "\033[1m"
-    CYAN = "\033[36m"
-    GREEN = "\033[32m"
-    RESET = "\033[0m"
-
     # Warez-style header box
     title = f"{river} à {name}"
     code_line = f"[{code}]"
@@ -551,6 +550,23 @@ def plot_station(station: dict, target_date: date | None = None) -> None:
     display(station, dates, values, avg, avg_count, target_date)
 
 
+def print_rain_section(
+    forecast: list[tuple[str, float]], is_today: bool, is_future: bool
+) -> None:
+    """Print rain forecast section or N/A message."""
+    if forecast:
+        rain_label = "Rain forecast (next 8h)" if is_today else "Rain"
+        print(f"  {BOLD}{rain_label}:{RESET}")
+        max_mm = max(mm for _, mm in forecast)
+        for hour, mm in forecast:
+            bar = "▇" * round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else ""
+            print(f"  {hour}  {mm:4.1f} mm  {CYAN}{bar}{RESET}")
+        print()
+    elif is_future:
+        print(f"  {BOLD}Rain:{RESET} N/A (date too far in the future)")
+        print()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="French river water height console tool"
@@ -604,9 +620,6 @@ def main() -> None:
         sys.exit(1)
     print(f"Found {len(stations)} station(s) near {args.location}\n")
 
-    DIM = "\033[2m"
-    RESET = "\033[0m"
-
     cache = load_cache()
     rows = []
     for station in stations:
@@ -641,25 +654,11 @@ def main() -> None:
     save_cache(cache)
 
     # Weather and sunlight for the searched location
-    BOLD = "\033[1m"
-    CYAN = "\033[36m"
-    YELLOW = "\033[33m"
-    RESET = "\033[0m"
-
     forecast = fetch_rain_forecast(lat, lon, target_date)
-    is_today = target_date is None or target_date == date.today()
-    is_future = target_date is not None and target_date > date.today()
-    if forecast:
-        rain_label = "Rain forecast (next 8h)" if is_today else "Rain"
-        print(f"  {BOLD}{rain_label}:{RESET}")
-        max_mm = max(mm for _, mm in forecast)
-        for hour, mm in forecast:
-            bar = "▇" * round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else ""
-            print(f"  {hour}  {mm:4.1f} mm  {CYAN}{bar}{RESET}")
-        print()
-    elif is_future:
-        print(f"  {BOLD}Rain:{RESET} N/A (date too far in the future)")
-        print()
+    today = date.today()
+    is_today = target_date is None or target_date == today
+    is_future = target_date is not None and target_date > today
+    print_rain_section(forecast, is_today, is_future)
 
     sun = fetch_sunlight(lat, lon, target_date)
     if sun:
