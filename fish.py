@@ -569,13 +569,18 @@ def main() -> None:
         default=None,
         help="Date to display data for (default: today)",
     )
+    parser.add_argument(
+        "--tomorrow",
+        action="store_true",
+        help="Show data for tomorrow (equivalent to --date with tomorrow's date)",
+    )
     args = parser.parse_args()
 
     if args.station_list:
         search_stations(args.station_list)
         return
 
-    target_date = args.date
+    target_date = date.today() + timedelta(days=1) if args.tomorrow else args.date
 
     if args.station:
         station = get_station_info(args.station)

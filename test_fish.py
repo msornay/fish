@@ -652,3 +652,27 @@ def test_display_table_shows_today_for_future_date():
         fish.display_table(rows, future)
         output = out.getvalue()
     assert "Today" in output
+
+
+# --- --tomorrow argument ---
+
+
+def test_tomorrow_flag_sets_target_date():
+    """--tomorrow should set target_date to tomorrow's date."""
+    tomorrow = date.today() + timedelta(days=1)
+    parser = fish.argparse.ArgumentParser()
+    parser.add_argument("location", nargs="?")
+    parser.add_argument("--date", type=date.fromisoformat, default=None)
+    parser.add_argument("--tomorrow", action="store_true")
+    args = parser.parse_args(["Paris", "--tomorrow"])
+    assert args.tomorrow is True
+    target_date = date.today() + timedelta(days=1) if args.tomorrow else args.date
+    assert target_date == tomorrow
+
+
+def test_tomorrow_flag_default_is_false():
+    parser = fish.argparse.ArgumentParser()
+    parser.add_argument("location", nargs="?")
+    parser.add_argument("--tomorrow", action="store_true")
+    args = parser.parse_args(["Paris"])
+    assert args.tomorrow is False
