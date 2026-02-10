@@ -660,19 +660,20 @@ def test_display_table_shows_today_for_future_date():
 def test_tomorrow_flag_sets_target_date():
     """--tomorrow should set target_date to tomorrow's date."""
     tomorrow = date.today() + timedelta(days=1)
-    parser = fish.argparse.ArgumentParser()
-    parser.add_argument("location", nargs="?")
-    parser.add_argument("--date", type=date.fromisoformat, default=None)
-    parser.add_argument("--tomorrow", action="store_true")
+    parser = fish.build_parser()
     args = parser.parse_args(["Paris", "--tomorrow"])
     assert args.tomorrow is True
-    target_date = date.today() + timedelta(days=1) if args.tomorrow else args.date
+    target_date = tomorrow if args.tomorrow else args.date
     assert target_date == tomorrow
 
 
 def test_tomorrow_flag_default_is_false():
-    parser = fish.argparse.ArgumentParser()
-    parser.add_argument("location", nargs="?")
-    parser.add_argument("--tomorrow", action="store_true")
+    parser = fish.build_parser()
     args = parser.parse_args(["Paris"])
     assert args.tomorrow is False
+
+
+def test_tomorrow_and_date_are_mutually_exclusive():
+    parser = fish.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["Paris", "--tomorrow", "--date", "2025-01-01"])

@@ -551,7 +551,7 @@ def plot_station(station: dict, target_date: date | None = None) -> None:
     display(station, dates, values, avg, avg_count, target_date)
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="French river water height console tool"
     )
@@ -562,18 +562,24 @@ def main() -> None:
     parser.add_argument(
         "--station-list", metavar="QUERY", help="Search stations by name or river"
     )
-    parser.add_argument(
+    date_group = parser.add_mutually_exclusive_group()
+    date_group.add_argument(
         "--date",
         metavar="YYYY-MM-DD",
         type=date.fromisoformat,
         default=None,
         help="Date to display data for (default: today)",
     )
-    parser.add_argument(
+    date_group.add_argument(
         "--tomorrow",
         action="store_true",
         help="Show data for tomorrow (equivalent to --date with tomorrow's date)",
     )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.station_list:
