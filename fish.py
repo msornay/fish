@@ -17,6 +17,14 @@ BASE = "https://hubeau.eaufrance.fr/api/v2/hydrometrie"
 GEOCODE_URL = "https://api-adresse.data.gouv.fr/search/"
 TIMEOUT = 30
 
+# ANSI escape codes
+BOLD = "\033[1m"
+DIM = "\033[2m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+RESET = "\033[0m"
+
 
 def geocode(location: str) -> tuple[float, float]:
     """Geocode a location name using the French address API. Returns (lat, lon)."""
@@ -295,10 +303,6 @@ def display_table(
     target_date: date | None = None,
 ) -> None:
     """Print a table of station data."""
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    RESET = "\033[0m"
-
     ref = target_date or date.today()
     date_label = "Today" if ref >= date.today() else ref.strftime("%b %d")
     headers = ("River", "Station", "Code", date_label, "10y avg")
@@ -453,12 +457,6 @@ def display(
     river = station.get("libelle_cours_eau", "?")
     code = station["code_station"]
 
-    # ANSI escape codes
-    BOLD = "\033[1m"
-    CYAN = "\033[36m"
-    GREEN = "\033[32m"
-    RESET = "\033[0m"
-
     # Warez-style header box
     title = f"{river} à {name}"
     code_line = f"[{code}]"
@@ -556,9 +554,6 @@ def print_rain_section(
     forecast: list[tuple[str, float]], is_today: bool, is_future: bool
 ) -> None:
     """Print rain forecast section or N/A message."""
-    BOLD = "\033[1m"
-    CYAN = "\033[36m"
-    RESET = "\033[0m"
     if forecast:
         rain_label = "Rain forecast (next 8h)" if is_today else "Rain"
         print(f"  {BOLD}{rain_label}:{RESET}")
@@ -625,9 +620,6 @@ def main() -> None:
         sys.exit(1)
     print(f"Found {len(stations)} station(s) near {args.location}\n")
 
-    DIM = "\033[2m"
-    RESET = "\033[0m"
-
     cache = load_cache()
     rows = []
     for station in stations:
@@ -662,13 +654,10 @@ def main() -> None:
     save_cache(cache)
 
     # Weather and sunlight for the searched location
-    BOLD = "\033[1m"
-    YELLOW = "\033[33m"
-    RESET = "\033[0m"
-
     forecast = fetch_rain_forecast(lat, lon, target_date)
-    is_today = target_date is None or target_date == date.today()
-    is_future = target_date is not None and target_date > date.today()
+    today = date.today()
+    is_today = target_date is None or target_date == today
+    is_future = target_date is not None and target_date > today
     print_rain_section(forecast, is_today, is_future)
 
     sun = fetch_sunlight(lat, lon, target_date)

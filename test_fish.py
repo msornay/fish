@@ -684,3 +684,23 @@ def test_rain_na_displayed_for_future_date():
         output = out.getvalue()
     assert "Rain:" in output
     assert "N/A (date too far in the future)" in output
+
+
+def test_rain_section_today_label():
+    forecast = [("14:00", 1.2), ("15:00", 0.5)]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_rain_section(forecast=forecast, is_today=True, is_future=False)
+        output = out.getvalue()
+    assert "Rain forecast (next 8h):" in output
+    assert "1.2 mm" in output
+    assert "0.5 mm" in output
+
+
+def test_rain_section_past_date_label():
+    forecast = [("10:00", 2.0)]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_rain_section(forecast=forecast, is_today=False, is_future=False)
+        output = out.getvalue()
+    assert "Rain:" in output
+    assert "Rain forecast (next 8h)" not in output
+    assert "2.0 mm" in output
