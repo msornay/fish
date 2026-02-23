@@ -376,6 +376,27 @@ def test_prepopulate_cache_handles_api_errors(mock_fetch):
     assert cache["data"] == {}
 
 
+@patch("fish.fetch_obs_elab")
+def test_prepopulate_cache_year_boundary(mock_fetch):
+    """When target_date is in Oct-Dec, the 90-day window crosses into the next year.
+    Ensure the historical date range doesn't invert (d_min > d_max)."""
+    mock_fetch.return_value = [
+        {"date_obs_elab": "2024-11-15", "resultat_obs_elab": 200.0},
+        {"date_obs_elab": "2025-01-10", "resultat_obs_elab": 300.0},
+    ]
+    cache = {"year": 2026, "data": {}}
+    # Nov 15 + 90 days = mid-Feb next year — crosses year boundary
+    fish.prepopulate_cache("X", "HmnJ", cache, target_date=date(2026, 11, 15))
+    assert mock_fetch.call_count == 10
+    # Verify each call has d_min <= d_max
+    for call in mock_fetch.call_args_list:
+        d_min_str, d_max_str = call[0][1], call[0][2]
+        assert d_min_str <= d_max_str, f"Inverted range: {d_min_str} > {d_max_str}"
+    # Verify cache was populated with data from both sides of the year boundary
+    assert "X:11-15:HmnJ" in cache["data"]
+    assert "X:01-10:HmnJ" in cache["data"]
+
+
 # --- display_table ---
 
 

@@ -250,15 +250,14 @@ def prepopulate_cache(
 ) -> None:
     """Fetch 3 months of historical averages starting at target_date across 10 years, store in cache."""
     ref = target_date or date.today()
-    end = ref + timedelta(days=90)
     by_day: dict[str, list[float]] = defaultdict(list)
 
     for year_offset in range(1, 11):
         try:
             d_min = ref.replace(year=ref.year - year_offset)
-            d_max = end.replace(year=ref.year - year_offset)
         except ValueError:
             continue
+        d_max = d_min + timedelta(days=90)
         year = ref.year - year_offset
         print(
             f"  Caching {code} {grandeur} [{year_offset}/10] {year}...",
