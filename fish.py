@@ -536,9 +536,7 @@ def plot_station(station: dict, target_date: date | None = None) -> None:
         dates, values, grandeur = fetch_recent_3months(code, target_date)
         if grandeur:
             cache = load_cache()
-            avg, avg_count = get_historical_average(
-                code, grandeur, cache, target_date
-            )
+            avg, avg_count = get_historical_average(code, grandeur, cache, target_date)
             save_cache(cache)
         else:
             avg, avg_count = None, 0
