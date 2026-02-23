@@ -276,17 +276,23 @@ def test_fetch_rain_forecast_returns_empty_on_error(mock_get):
 # --- plot_station ---
 
 
+@patch("fish.save_cache")
 @patch("fish.display")
-@patch("fish.fetch_historical_average", return_value=(150.0, 5))
+@patch("fish.get_historical_average", return_value=(150.0, 5))
+@patch("fish.load_cache", return_value={"year": 2026, "data": {}})
 @patch(
     "fish.fetch_recent_3months",
     return_value=(["2025-03-01"], [100], "HmnJ"),
 )
-def test_plot_station_calls_display(mock_recent, mock_avg, mock_display):
+def test_plot_station_calls_display(
+    mock_recent, mock_load, mock_avg, mock_display, mock_save
+):
     station = {"code_station": "X1"}
     fish.plot_station(station)
     mock_recent.assert_called_once_with("X1", None)
-    mock_avg.assert_called_once_with("X1", "HmnJ", None)
+    mock_load.assert_called_once()
+    mock_avg.assert_called_once()
+    mock_save.assert_called_once()
     mock_display.assert_called_once_with(station, ["2025-03-01"], [100], 150.0, 5, None)
 
 
@@ -580,18 +586,24 @@ def test_display_table_with_past_date():
 # --- plot_station with target_date ---
 
 
+@patch("fish.save_cache")
 @patch("fish.display")
-@patch("fish.fetch_historical_average", return_value=(150.0, 5))
+@patch("fish.get_historical_average", return_value=(150.0, 5))
+@patch("fish.load_cache", return_value={"year": 2026, "data": {}})
 @patch(
     "fish.fetch_recent_3months",
     return_value=(["2025-06-15"], [100], "HmnJ"),
 )
-def test_plot_station_with_target_date(mock_recent, mock_avg, mock_display):
+def test_plot_station_with_target_date(
+    mock_recent, mock_load, mock_avg, mock_display, mock_save
+):
     station = {"code_station": "X1"}
     target = date(2025, 6, 15)
     fish.plot_station(station, target)
     mock_recent.assert_called_once_with("X1", target)
-    mock_avg.assert_called_once_with("X1", "HmnJ", target)
+    mock_load.assert_called_once()
+    mock_avg.assert_called_once()
+    mock_save.assert_called_once()
     mock_display.assert_called_once_with(
         station, ["2025-06-15"], [100], 150.0, 5, target
     )

@@ -535,11 +535,14 @@ def plot_station(station: dict, target_date: date | None = None) -> None:
     code = station["code_station"]
     try:
         dates, values, grandeur = fetch_recent_3months(code, target_date)
-        avg, avg_count = (
-            fetch_historical_average(code, grandeur, target_date)
-            if grandeur
-            else (None, 0)
-        )
+        if grandeur:
+            cache = load_cache()
+            avg, avg_count = get_historical_average(
+                code, grandeur, cache, target_date
+            )
+            save_cache(cache)
+        else:
+            avg, avg_count = None, 0
     except httpx.HTTPStatusError as e:
         name = station.get("libelle_station", code)
         print(
