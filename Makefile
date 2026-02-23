@@ -3,6 +3,7 @@
 test:
 	python3 -m pytest test_fish.py -v
 	ruff check .
+	ruff format --check .
 
 lint:
 	ruff check .
