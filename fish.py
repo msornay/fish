@@ -453,11 +453,10 @@ def display(
 ) -> None:
     """Render the graph and summary."""
     name = station.get("libelle_station", "?")
-    river = station.get("libelle_cours_eau", "?")
     code = station["code_station"]
 
     # Warez-style header box
-    title = f"{river} à {name}"
+    title = name
     code_line = f"[{code}]"
     box_width = max(len(title), len(code_line)) + 4
     print(f"{CYAN}┌{'─' * box_width}┐{RESET}")

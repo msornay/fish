@@ -397,6 +397,25 @@ def test_prepopulate_cache_year_boundary(mock_fetch):
     assert "X:01-10:HmnJ" in cache["data"]
 
 
+# --- display ---
+
+
+@patch("fish.plt")
+def test_display_header_no_duplicate_river(mock_plt):
+    """Header should show station name directly, not prepend river name."""
+    station = {
+        "code_station": "F700000103",
+        "libelle_station": "La Seine à Paris - Austerlitz [>2006]",
+        "libelle_cours_eau": "La Seine",
+    }
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.display(station, [], [], None, 0)
+        output = out.getvalue()
+    # Station name should appear once, not duplicated with river prefix
+    assert "La Seine à La Seine" not in output
+    assert "La Seine à Paris - Austerlitz [>2006]" in output
+
+
 # --- display_table ---
 
 
