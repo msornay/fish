@@ -1,8 +1,10 @@
-# Project Notes
+# CLAUDE.md
 
-## Environment
-- Use the virtualenv at `~/venv/dev` for all dependency installation and script execution.
-- Activate with: `source ~/venv/dev/bin/activate`
+## Commands
 
-## Testing
-- Run tests with: `pytest test_fish.py -v`
+- `make test` — run tests + lint + format check
+- `make lint` — ruff check + format check
+
+## Style
+
+- Lint and format with `ruff`
