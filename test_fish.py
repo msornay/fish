@@ -57,13 +57,18 @@ def test_fetch_obs_elab_single_page(mock_get):
 
 @patch("fish.httpx.get")
 def test_fetch_obs_elab_pagination(mock_get):
+    cursor_url = "https://hubeau.eaufrance.fr/api/v2/hydrometrie/obs_elab?cursor=xyz789"
     mock_get.side_effect = [
-        _mock_response([{"v": 1}], cursor="abc"),
+        _mock_response([{"v": 1}], cursor=cursor_url),
         _mock_response([{"v": 2}]),
     ]
     result = fish.fetch_obs_elab("X", "2025-01-01", "2025-03-01")
     assert len(result) == 2
     assert mock_get.call_count == 2
+    # Second call should use the cursor URL directly, not merge with params
+    second_call = mock_get.call_args_list[1]
+    assert second_call[0][0] == cursor_url
+    assert "params" not in second_call[1]
 
 
 @patch("fish.httpx.get")
@@ -232,13 +237,18 @@ def test_search_stations_nearby_returns_data(mock_get):
 
 @patch("fish.httpx.get")
 def test_search_stations_nearby_paginates(mock_get):
+    cursor_url = "https://hubeau.eaufrance.fr/api/v2/hydrometrie/referentiel/stations?cursor=abc123"
     mock_get.side_effect = [
-        _mock_response([{"code_station": "S1"}], cursor="abc"),
+        _mock_response([{"code_station": "S1"}], cursor=cursor_url),
         _mock_response([{"code_station": "S2"}]),
     ]
     result = fish.search_stations_nearby(48.85, 2.35, 25)
     assert len(result) == 2
     assert mock_get.call_count == 2
+    # Second call should use the cursor URL directly, not merge with params
+    second_call = mock_get.call_args_list[1]
+    assert second_call[0][0] == cursor_url
+    assert "params" not in second_call[1]
 
 
 @patch("fish.httpx.get")

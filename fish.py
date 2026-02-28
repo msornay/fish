@@ -53,16 +53,19 @@ def search_stations_nearby(lat: float, lon: float, radius_km: float) -> list[dic
         "size": 20,
     }
     stations: list[dict] = []
-    cursor: str | None = None
+    url: str | None = None
     while True:
-        if cursor:
-            params["cursor"] = cursor
-        resp = httpx.get(f"{BASE}/referentiel/stations", params=params, timeout=TIMEOUT)
+        if url:
+            resp = httpx.get(url, timeout=TIMEOUT)
+        else:
+            resp = httpx.get(
+                f"{BASE}/referentiel/stations", params=params, timeout=TIMEOUT
+            )
         resp.raise_for_status()
         body = resp.json()
         stations.extend(body.get("data", []))
-        cursor = body.get("next")
-        if not cursor:
+        url = body.get("next")
+        if not url:
             break
     return stations
 
@@ -122,25 +125,26 @@ def fetch_obs_elab(
 ) -> list[dict]:
     """Fetch elaborated observations for a date range."""
     results = []
-    cursor = None
+    url = None
     while True:
-        params = {
-            "code_entite": code,
-            "date_debut_obs_elab": date_min,
-            "date_fin_obs_elab": date_max,
-            "size": 1000,
-            "format": "json",
-        }
-        if grandeur:
-            params["grandeur_hydro_elab"] = grandeur
-        if cursor:
-            params["cursor"] = cursor
-        resp = httpx.get(f"{BASE}/obs_elab", params=params, timeout=TIMEOUT)
+        if url:
+            resp = httpx.get(url, timeout=TIMEOUT)
+        else:
+            params = {
+                "code_entite": code,
+                "date_debut_obs_elab": date_min,
+                "date_fin_obs_elab": date_max,
+                "size": 1000,
+                "format": "json",
+            }
+            if grandeur:
+                params["grandeur_hydro_elab"] = grandeur
+            resp = httpx.get(f"{BASE}/obs_elab", params=params, timeout=TIMEOUT)
         resp.raise_for_status()
         body = resp.json()
         results.extend(body.get("data", []))
-        cursor = body.get("next")
-        if not cursor:
+        url = body.get("next")
+        if not url:
             break
     return results
 
