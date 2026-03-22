@@ -432,7 +432,7 @@ def test_display_header_no_duplicate_river(mock_plt):
 def test_display_table_output():
     rows = [
         ("La Loue", "Station A", "X001", 854.0, 862.0, 10),
-        ("Le Doubs", "Station B", "X002", None, None, 0),
+        ("Le Doubs", "Station B", "X002", 120.0, None, 0),
     ]
     with patch("sys.stdout", new_callable=StringIO) as out:
         fish.display_table(rows)
@@ -441,7 +441,68 @@ def test_display_table_output():
     assert "X001" in output
     assert "854 mm" in output
     assert "862 mm" in output
-    assert "— mm" in output
+
+
+def test_display_table_skips_missing_level():
+    rows = [
+        ("La Loue", "Station A", "X001", 854.0, 862.0, 10),
+        ("Le Doubs", "Station B", "X002", None, None, 0),
+    ]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.display_table(rows)
+        output = out.getvalue()
+    assert "X001" in output
+    assert "X002" not in output
+
+
+def test_display_table_skips_missing_river():
+    rows = [
+        ("?", "Station A", "X001", 854.0, 862.0, 10),
+    ]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.display_table(rows)
+        output = out.getvalue()
+    assert "X001" not in output
+
+
+def test_display_table_skips_missing_code():
+    rows = [
+        ("La Loue", "Station A", "", 854.0, 862.0, 10),
+    ]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.display_table(rows)
+        output = out.getvalue()
+    assert "Station A" not in output
+
+
+def test_display_table_lines_max_79_chars():
+    rows = [
+        (
+            "Le Doubs",
+            "La Seine à Paris - Austerlitz [>2006]",
+            "F700000103",
+            854.0,
+            862.0,
+            10,
+        ),
+    ]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.display_table(rows)
+        output = out.getvalue()
+    for line in output.splitlines():
+        # Strip ANSI escape codes before measuring
+        clean = line
+        for code in [
+            fish.BOLD,
+            fish.DIM,
+            fish.CYAN,
+            fish.GREEN,
+            fish.YELLOW,
+            fish.RED,
+            fish.RESET,
+        ]:
+            clean = clean.replace(code, "")
+        assert len(clean) <= 79, f"Line is {len(clean)} chars: {clean!r}"
 
 
 # --- fetch_sunlight ---
@@ -602,6 +663,26 @@ def test_fetch_sunlight_with_explicit_date(mock_get):
     assert "forecast_days" not in params
 
 
+@patch("fish.date")
+@patch("fish.httpx.get")
+def test_fetch_sunlight_past_date_uses_archive(mock_get, mock_date):
+    mock_date.today.return_value = date(2026, 3, 22)
+    mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+    resp = MagicMock()
+    resp.json.return_value = {
+        "daily": {
+            "sunrise": ["2025-03-25T06:30"],
+            "sunset": ["2025-03-25T19:00"],
+        }
+    }
+    resp.raise_for_status.return_value = None
+    mock_get.return_value = resp
+    result = fish.fetch_sunlight(48.85, 2.35, date(2025, 3, 25))
+    assert result["sunrise"] == "06:30"
+    call_url = mock_get.call_args[0][0]
+    assert "archive" in call_url
+
+
 # --- fetch_recent_3months with target_date ---
 
 
@@ -758,6 +839,29 @@ def test_rain_section_today_label():
     assert "0.5 mm" in output
 
 
+def test_rain_section_dims_non_fishable_hours():
+    forecast = [("05:00", 1.0), ("10:00", 2.0)]
+    sun = {"sunrise": "07:00", "sunset": "20:00"}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_rain_section(
+            forecast=forecast, is_today=True, is_future=False, sunlight=sun
+        )
+        output = out.getvalue()
+    # 05:00 is before fishable window, should be dimmed
+    assert fish.DIM in output
+    # 10:00 is fishable, should have normal CYAN bar
+    assert fish.CYAN in output
+
+
+def test_rain_section_no_sunlight_all_cyan():
+    forecast = [("05:00", 1.0), ("10:00", 2.0)]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_rain_section(forecast=forecast, is_today=True, is_future=False)
+        output = out.getvalue()
+    # No DIM when sunlight is unavailable
+    assert fish.DIM not in output
+
+
 def test_rain_section_past_date_label():
     forecast = [("10:00", 2.0)]
     with patch("sys.stdout", new_callable=StringIO) as out:
@@ -766,3 +870,290 @@ def test_rain_section_past_date_label():
     assert "Rain:" in output
     assert "Rain forecast (next 8h)" not in output
     assert "2.0 mm" in output
+
+
+# --- degrees_to_compass ---
+
+
+def test_degrees_to_compass_north():
+    assert fish.degrees_to_compass(0) == "N"
+    assert fish.degrees_to_compass(360) == "N"
+
+
+def test_degrees_to_compass_cardinal():
+    assert fish.degrees_to_compass(90) == "E"
+    assert fish.degrees_to_compass(180) == "S"
+    assert fish.degrees_to_compass(270) == "W"
+
+
+def test_degrees_to_compass_intercardinal():
+    assert fish.degrees_to_compass(45) == "NE"
+    assert fish.degrees_to_compass(135) == "SE"
+    assert fish.degrees_to_compass(225) == "SW"
+    assert fish.degrees_to_compass(315) == "NW"
+
+
+def test_degrees_to_compass_boundary():
+    assert fish.degrees_to_compass(22) == "N"
+    assert fish.degrees_to_compass(23) == "NE"
+
+
+# --- wind_color ---
+
+
+def test_wind_color_green():
+    assert fish.wind_color(10, 15) == fish.GREEN
+
+
+def test_wind_color_yellow_by_speed():
+    assert fish.wind_color(20, 15) == fish.YELLOW
+
+
+def test_wind_color_yellow_by_gust():
+    assert fish.wind_color(10, 25) == fish.YELLOW
+
+
+def test_wind_color_red_by_speed():
+    assert fish.wind_color(30, 15) == fish.RED
+
+
+def test_wind_color_red_by_gust():
+    assert fish.wind_color(10, 35) == fish.RED
+
+
+def test_wind_color_boundary_green():
+    assert fish.wind_color(14.9, 19.9) == fish.GREEN
+
+
+def test_wind_color_boundary_yellow():
+    assert fish.wind_color(15, 20) == fish.YELLOW
+
+
+def test_wind_color_boundary_red():
+    assert fish.wind_color(25.1, 20) == fish.RED
+
+
+# --- is_fishable_hour ---
+
+
+def test_is_fishable_hour_within_window():
+    assert fish.is_fishable_hour("10:00", "07:00", "20:00") is True
+
+
+def test_is_fishable_hour_before_sunrise():
+    assert fish.is_fishable_hour("05:00", "07:00", "20:00") is False
+
+
+def test_is_fishable_hour_after_sunset():
+    assert fish.is_fishable_hour("22:00", "07:00", "20:00") is False
+
+
+def test_is_fishable_hour_within_30min_before_sunrise():
+    assert fish.is_fishable_hour("06:30", "07:00", "20:00") is True
+
+
+def test_is_fishable_hour_within_30min_after_sunset():
+    assert fish.is_fishable_hour("20:30", "07:00", "20:00") is True
+
+
+def test_is_fishable_hour_just_outside_margin():
+    assert fish.is_fishable_hour("06:29", "07:00", "20:00") is False
+    assert fish.is_fishable_hour("20:31", "07:00", "20:00") is False
+
+
+# --- fetch_wind_forecast ---
+
+
+@patch("fish.httpx.get")
+def test_fetch_wind_forecast_parses_response(mock_get):
+    resp = MagicMock()
+    resp.json.return_value = {
+        "hourly": {
+            "time": ["2025-03-01T10:00", "2025-03-01T11:00"],
+            "wind_speed_10m": [12.5, 22.0],
+            "wind_direction_10m": [315, 270],
+            "wind_gusts_10m": [18.0, 28.0],
+        }
+    }
+    resp.raise_for_status.return_value = None
+    mock_get.return_value = resp
+    result = fish.fetch_wind_forecast(48.85, 2.35)
+    assert result == [
+        ("10:00", 12.5, 315, 18.0),
+        ("11:00", 22.0, 270, 28.0),
+    ]
+
+
+@patch("fish.httpx.get")
+def test_fetch_wind_forecast_returns_empty_on_error(mock_get):
+    mock_get.side_effect = Exception("network error")
+    assert fish.fetch_wind_forecast(48.85, 2.35) == []
+
+
+@patch("fish.date")
+@patch("fish.httpx.get")
+def test_fetch_wind_forecast_past_date_uses_archive(mock_get, mock_date):
+    mock_date.today.return_value = date(2026, 3, 22)
+    mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+    resp = MagicMock()
+    resp.json.return_value = {
+        "hourly": {
+            "time": ["2025-06-15T10:00"],
+            "wind_speed_10m": [10.0],
+            "wind_direction_10m": [180],
+            "wind_gusts_10m": [15.0],
+        }
+    }
+    resp.raise_for_status.return_value = None
+    mock_get.return_value = resp
+    fish.fetch_wind_forecast(48.85, 2.35, date(2025, 6, 15))
+    call_url = mock_get.call_args[0][0]
+    assert "archive" in call_url
+
+
+# --- print_wind_section ---
+
+
+def test_wind_section_today_label():
+    data = [("14:00", 10.0, 315, 15.0)]
+    sun = {"sunrise": "07:00", "sunset": "20:00"}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_wind_section(data, is_today=True, is_future=False, sunlight=sun)
+        output = out.getvalue()
+    assert "Wind forecast (next 8h):" in output
+
+
+def test_wind_section_past_label():
+    data = [("14:00", 10.0, 315, 15.0)]
+    sun = {"sunrise": "07:00", "sunset": "20:00"}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_wind_section(data, is_today=False, is_future=False, sunlight=sun)
+        output = out.getvalue()
+    assert "Wind:" in output
+    assert "Wind forecast (next 8h)" not in output
+
+
+def test_wind_section_future_empty():
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_wind_section([], is_today=False, is_future=True)
+        output = out.getvalue()
+    assert "N/A (date too far in the future)" in output
+
+
+def test_wind_section_shows_compass():
+    data = [("10:00", 10.0, 315, 15.0)]
+    sun = {"sunrise": "07:00", "sunset": "20:00"}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_wind_section(data, is_today=True, is_future=False, sunlight=sun)
+        output = out.getvalue()
+    assert "NW" in output
+
+
+def test_wind_section_shows_speed_and_gust():
+    data = [("10:00", 12.5, 90, 18.0)]
+    sun = {"sunrise": "07:00", "sunset": "20:00"}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_wind_section(data, is_today=True, is_future=False, sunlight=sun)
+        output = out.getvalue()
+    assert "12.5" in output
+    assert "18.0" in output
+
+
+def test_wind_section_overall_green():
+    data = [("10:00", 8.0, 0, 12.0), ("11:00", 10.0, 45, 15.0)]
+    sun = {"sunrise": "07:00", "sunset": "20:00"}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_wind_section(data, is_today=True, is_future=False, sunlight=sun)
+        output = out.getvalue()
+    assert "Great for casting" in output
+
+
+def test_wind_section_overall_yellow():
+    data = [("10:00", 8.0, 0, 12.0), ("11:00", 20.0, 180, 25.0)]
+    sun = {"sunrise": "07:00", "sunset": "20:00"}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_wind_section(data, is_today=True, is_future=False, sunlight=sun)
+        output = out.getvalue()
+    assert "Challenging conditions" in output
+
+
+def test_wind_section_overall_red():
+    data = [("10:00", 30.0, 270, 40.0)]
+    sun = {"sunrise": "07:00", "sunset": "20:00"}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_wind_section(data, is_today=True, is_future=False, sunlight=sun)
+        output = out.getvalue()
+    assert "Too windy for fly fishing" in output
+
+
+def test_wind_section_overall_ignores_non_fishable_hours():
+    # Red wind at 05:00 (before fishable window), green at 10:00
+    data = [("05:00", 30.0, 270, 40.0), ("10:00", 8.0, 0, 12.0)]
+    sun = {"sunrise": "07:00", "sunset": "20:00"}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_wind_section(data, is_today=True, is_future=False, sunlight=sun)
+        output = out.getvalue()
+    assert "Great for casting" in output
+
+
+def test_wind_section_no_sunlight_all_hours_count():
+    data = [("05:00", 30.0, 270, 40.0), ("10:00", 8.0, 0, 12.0)]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_wind_section(data, is_today=True, is_future=False)
+        output = out.getvalue()
+    assert "Too windy for fly fishing" in output
+
+
+# --- print_summary ---
+
+
+def test_summary_all_data():
+    rows = [("La Loue", "Station A", "X001", 900.0, 800.0, 10)]
+    forecast = [("10:00", 0.0), ("11:00", 0.0)]
+    wind = [("10:00", 8.0, 0, 12.0)]
+    sun = {"sunrise": "07:00", "sunset": "20:00"}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_summary(rows, forecast, wind, sun)
+        output = out.getvalue()
+    assert "+12%" in output
+    assert "dry" in output.lower()
+    assert "Great for casting" in output
+
+
+def test_summary_above_and_below_avg():
+    rows_above = [("R", "S", "X", 1120.0, 1000.0, 5)]
+    rows_below = [("R", "S", "X", 800.0, 1000.0, 5)]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_summary(rows_above, [], [], None)
+        assert "above" in out.getvalue().lower()
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_summary(rows_below, [], [], None)
+        assert "below" in out.getvalue().lower()
+
+
+def test_summary_with_rain():
+    rows = [("R", "S", "X", 500.0, 500.0, 5)]
+    forecast = [("10:00", 1.5), ("11:00", 2.0)]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_summary(rows, forecast, [], None)
+        output = out.getvalue()
+    assert "3.5 mm" in output
+
+
+def test_summary_no_levels():
+    rows = [("R", "S", "X", 500.0, None, 0)]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_summary(rows, [], [], None)
+        output = out.getvalue()
+    # No level comparison possible, should still print something
+    assert ">>" in output
+
+
+def test_summary_wind_red():
+    rows = [("R", "S", "X", 500.0, 500.0, 5)]
+    wind = [("10:00", 30.0, 270, 40.0)]
+    sun = {"sunrise": "07:00", "sunset": "20:00"}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_summary(rows, [], wind, sun)
+        output = out.getvalue()
+    assert "Too windy" in output

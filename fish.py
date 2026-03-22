@@ -23,6 +23,7 @@ DIM = "\033[2m"
 CYAN = "\033[36m"
 GREEN = "\033[32m"
 YELLOW = "\033[33m"
+RED = "\033[31m"
 RESET = "\033[0m"
 
 
@@ -310,10 +311,12 @@ def display_table(
     date_label = "Today" if ref >= date.today() else ref.strftime("%b %d")
     headers = ("River", "Station", "Code", date_label, "10y avg")
     ra = (False, False, False, True, True)
-    # Compute column widths
+    # Filter and format rows
     fmt_rows = []
     for river, name, code, today_val, avg_val, avg_count in rows:
-        today_s = f"{today_val:.0f} mm" if today_val is not None else "— mm"
+        if not code or river == "?" or today_val is None:
+            continue
+        today_s = f"{today_val:.0f} mm"
         if avg_val is not None:
             avg_s = f"{avg_val:.0f} mm ({avg_count}y)"
         else:
@@ -325,20 +328,67 @@ def display_table(
         for i, cell in enumerate(r):
             col_w[i] = max(col_w[i], len(cell))
 
+    # Shrink River (0) and Station (1) to fit within 79 chars (2 indent + content)
+    max_content = 79 - 2  # 2-char left indent
+    separators = 2 * (len(col_w) - 1)
+    while sum(col_w) + separators > max_content:
+        # Shrink the wider of River/Station first
+        shrink = 0 if col_w[0] >= col_w[1] else 1
+        if col_w[shrink] <= len(headers[shrink]):
+            shrink = 1 - shrink
+        if col_w[shrink] <= len(headers[shrink]):
+            break
+        col_w[shrink] -= 1
+
+    def truncate(text: str, width: int) -> str:
+        return text[:width] if len(text) > width else text
+
     def row_str(cells: tuple[str, ...], right_align: tuple[bool, ...] = ra) -> str:
         parts = []
         for cell, w, r in zip(cells, col_w, right_align):
+            cell = truncate(cell, w)
             parts.append(cell.rjust(w) if r else cell.ljust(w))
         return "  ".join(parts)
 
+    row_width = sum(col_w) + separators
     print(f"  {BOLD}{row_str(headers)}{RESET}")
-    print(f"  {'─' * (sum(col_w) + 2 * (len(col_w) - 1))}")
+    print(f"  {'─' * row_width}")
     for river, name, code, today_s, avg_s in fmt_rows:
         r_str = row_str((river, name, code, today_s, avg_s))
         # Apply dim styling to the code column after padding
         r_str = r_str.replace(code, f"{DIM}{code}{RESET}", 1)
         print(f"  {r_str}")
     print()
+
+
+COMPASS_LABELS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+
+def degrees_to_compass(degrees: float) -> str:
+    """Convert wind direction in degrees to compass label."""
+    return COMPASS_LABELS[round(degrees / 45) % 8]
+
+
+def _hhmm_to_minutes(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
+
+
+def is_fishable_hour(hour: str, sunrise: str, sunset: str) -> bool:
+    """Check if an hour falls within the fishable window (sunrise-30min to sunset+30min)."""
+    t = _hhmm_to_minutes(hour)
+    start = _hhmm_to_minutes(sunrise) - 30
+    end = _hhmm_to_minutes(sunset) + 30
+    return start <= t <= end
+
+
+def wind_color(speed: float, gust: float) -> str:
+    """Return ANSI color for wind conditions from a fly fishing perspective."""
+    if speed > 25 or gust > 30:
+        return RED
+    if speed >= 15 or gust >= 20:
+        return YELLOW
+    return GREEN
 
 
 def fetch_rain_forecast(
@@ -394,24 +444,97 @@ def fetch_rain_forecast(
         return []
 
 
+def fetch_wind_forecast(
+    lat: float, lon: float, target_date: date | None = None
+) -> list[tuple[str, float, float, float]]:
+    """Fetch wind data from Open-Meteo. Returns list of (hour, speed_kmh, direction_deg, gust_kmh)."""
+    ref = target_date or date.today()
+    hourly = "wind_speed_10m,wind_direction_10m,wind_gusts_10m"
+    try:
+        if ref == date.today():
+            resp = httpx.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "hourly": hourly,
+                    "forecast_hours": 8,
+                    "timezone": "auto",
+                },
+                timeout=TIMEOUT,
+            )
+        elif ref < date.today():
+            resp = httpx.get(
+                "https://archive-api.open-meteo.com/v1/archive",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "hourly": hourly,
+                    "start_date": ref.isoformat(),
+                    "end_date": ref.isoformat(),
+                    "timezone": "auto",
+                },
+                timeout=TIMEOUT,
+            )
+        else:
+            resp = httpx.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "hourly": hourly,
+                    "start_date": ref.isoformat(),
+                    "end_date": ref.isoformat(),
+                    "timezone": "auto",
+                },
+                timeout=TIMEOUT,
+            )
+        resp.raise_for_status()
+        data = resp.json().get("hourly", {})
+        times = data.get("time", [])
+        speeds = data.get("wind_speed_10m", [])
+        directions = data.get("wind_direction_10m", [])
+        gusts = data.get("wind_gusts_10m", [])
+        return [
+            (t.split("T")[1], s, d, g)
+            for t, s, d, g in zip(times, speeds, directions, gusts)
+        ]
+    except Exception:
+        return []
+
+
 def fetch_sunlight(
     lat: float, lon: float, target_date: date | None = None
 ) -> dict | None:
     """Fetch sunrise/sunset from Open-Meteo. Falls back to same date last year for far-future dates."""
     ref = target_date or date.today()
     try:
-        resp = httpx.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "daily": "sunrise,sunset",
-                "timezone": "auto",
-                "start_date": ref.isoformat(),
-                "end_date": ref.isoformat(),
-            },
-            timeout=TIMEOUT,
-        )
+        if ref < date.today():
+            resp = httpx.get(
+                "https://archive-api.open-meteo.com/v1/archive",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "daily": "sunrise,sunset",
+                    "timezone": "auto",
+                    "start_date": ref.isoformat(),
+                    "end_date": ref.isoformat(),
+                },
+                timeout=TIMEOUT,
+            )
+        else:
+            resp = httpx.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "daily": "sunrise,sunset",
+                    "timezone": "auto",
+                    "start_date": ref.isoformat(),
+                    "end_date": ref.isoformat(),
+                },
+                timeout=TIMEOUT,
+            )
         if resp.status_code == 400 and ref > date.today():
             # Date beyond forecast range — use same date last year via archive API
             try:
@@ -554,7 +677,10 @@ def plot_station(station: dict, target_date: date | None = None) -> None:
 
 
 def print_rain_section(
-    forecast: list[tuple[str, float]], is_today: bool, is_future: bool
+    forecast: list[tuple[str, float]],
+    is_today: bool,
+    is_future: bool,
+    sunlight: dict | None = None,
 ) -> None:
     """Print rain forecast section or N/A message."""
     if forecast:
@@ -562,12 +688,121 @@ def print_rain_section(
         print(f"  {BOLD}{rain_label}:{RESET}")
         max_mm = max(mm for _, mm in forecast)
         for hour, mm in forecast:
-            bar = "▇" * round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else ""
-            print(f"  {hour}  {mm:4.1f} mm  {CYAN}{bar}{RESET}")
+            bar_len = round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else 0
+            fishable = True
+            if sunlight:
+                fishable = is_fishable_hour(
+                    hour, sunlight["sunrise"], sunlight["sunset"]
+                )
+            color = CYAN if fishable else DIM
+            bar = f"{color}{'▇' * bar_len}{RESET}" if bar_len else ""
+            print(f"  {hour}  {mm:4.1f} mm  {bar}")
         print()
     elif is_future:
         print(f"  {BOLD}Rain:{RESET} N/A (date too far in the future)")
         print()
+
+
+_WIND_VERDICTS = {
+    GREEN: "Great for casting",
+    YELLOW: "Challenging conditions",
+    RED: "Too windy for fly fishing",
+}
+_WIND_SEVERITY = {GREEN: 0, YELLOW: 1, RED: 2}
+
+
+def print_wind_section(
+    wind_data: list[tuple[str, float, float, float]],
+    is_today: bool,
+    is_future: bool,
+    sunlight: dict | None = None,
+) -> None:
+    """Print wind forecast section with fly-fishing color coding."""
+    if wind_data:
+        label = "Wind forecast (next 8h)" if is_today else "Wind"
+        print(f"  {BOLD}{label}:{RESET}")
+        max_speed = max(s for _, s, _, _ in wind_data)
+        worst_color = GREEN
+        for hour, speed, direction, gust in wind_data:
+            compass = degrees_to_compass(direction)
+            bar_len = round(speed / max_speed * 20) if max_speed > 0 else 0
+            fishable = True
+            if sunlight:
+                fishable = is_fishable_hour(
+                    hour, sunlight["sunrise"], sunlight["sunset"]
+                )
+            color = wind_color(speed, gust)
+            if fishable and _WIND_SEVERITY[color] > _WIND_SEVERITY[worst_color]:
+                worst_color = color
+            if fishable:
+                bar = f"{color}{'▇' * bar_len}{RESET}"
+            else:
+                bar = f"{DIM}{'▇' * bar_len}{RESET}"
+            print(
+                f"  {hour}  {speed:4.1f} km/h  {compass:2s}  gusts {gust:4.1f}  {bar}"
+            )
+        print(
+            f"  {BOLD}Overall:{RESET} {worst_color}{_WIND_VERDICTS[worst_color]}{RESET}"
+        )
+        print()
+    elif is_future:
+        print(f"  {BOLD}Wind:{RESET} N/A (date too far in the future)")
+        print()
+
+
+def print_summary(
+    rows: list[tuple[str, str, str, float | None, float | None, int]],
+    forecast: list[tuple[str, float]],
+    wind_data: list[tuple[str, float, float, float]],
+    sunlight: dict | None = None,
+) -> None:
+    """Print a one-line summary aggregating levels, rain, and wind."""
+    parts = []
+
+    # Levels vs 10y average
+    ratios = []
+    for _, _, _, today_val, avg_val, _ in rows:
+        if today_val is not None and avg_val is not None and avg_val > 0:
+            ratios.append(today_val / avg_val)
+    if ratios:
+        pct = round((sum(ratios) / len(ratios) - 1) * 100)
+        if pct > 0:
+            parts.append(f"Levels +{pct}% above avg")
+        elif pct < 0:
+            parts.append(f"Levels {pct}% below avg")
+        else:
+            parts.append("Levels at avg")
+
+    # Rain total (fishable hours only)
+    total_mm = 0.0
+    for hour, mm in forecast:
+        fishable = True
+        if sunlight:
+            fishable = is_fishable_hour(hour, sunlight["sunrise"], sunlight["sunset"])
+        if fishable:
+            total_mm += mm
+    if total_mm > 0:
+        parts.append(f"Rain: {total_mm:.1f} mm")
+    else:
+        parts.append("Rain: dry")
+
+    # Wind verdict (fishable hours only)
+    if wind_data:
+        worst = GREEN
+        for hour, speed, _, gust in wind_data:
+            fishable = True
+            if sunlight:
+                fishable = is_fishable_hour(
+                    hour, sunlight["sunrise"], sunlight["sunset"]
+                )
+            if fishable:
+                c = wind_color(speed, gust)
+                if _WIND_SEVERITY[c] > _WIND_SEVERITY[worst]:
+                    worst = c
+        parts.append(f"{worst}{_WIND_VERDICTS[worst]}{RESET}")
+
+    print()
+    print(f"  {GREEN}>>{RESET} {' | '.join(parts)}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -657,13 +892,17 @@ def main() -> None:
     save_cache(cache)
 
     # Weather and sunlight for the searched location
-    forecast = fetch_rain_forecast(lat, lon, target_date)
     today = date.today()
     is_today = target_date is None or target_date == today
     is_future = target_date is not None and target_date > today
-    print_rain_section(forecast, is_today, is_future)
 
     sun = fetch_sunlight(lat, lon, target_date)
+
+    forecast = fetch_rain_forecast(lat, lon, target_date)
+    print_rain_section(forecast, is_today, is_future, sun)
+    wind = fetch_wind_forecast(lat, lon, target_date)
+    print_wind_section(wind, is_today, is_future, sun)
+
     if sun:
         print(f"  {BOLD}Sunlight:{RESET}")
         print(f"  {YELLOW}☀{RESET}  Sunrise       {sun['sunrise']}")
@@ -671,6 +910,8 @@ def main() -> None:
         print(
             f"  {YELLOW}☀{RESET}  Peak sunlight {sun['peak_start']} – {sun['peak_end']}"
         )
+
+    print_summary(rows, forecast, wind, sun)
 
 
 if __name__ == "__main__":
