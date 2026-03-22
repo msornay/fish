@@ -4,7 +4,7 @@
 
 French river water height CLI tool using the [Hub'Eau](https://hubeau.eaufrance.fr/) API.
 
-Shows water levels, 10-year historical averages, rain forecasts, and sunrise/sunset times for any location in France.
+Shows water levels, 10-year historical averages, rain forecasts, wind conditions, and sunrise/sunset times for any location in France. Wind is color-coded for fly fishing: green (great for casting), yellow (challenging), red (too windy).
 
 ## Installation
 
@@ -20,7 +20,7 @@ pip install httpx plotext
 fish Paris
 ```
 
-Finds hydrometric stations within 25 km, shows current water height vs. 10-year average, rain forecast, and sunlight times.
+Finds hydrometric stations within 25 km, shows current water height vs. 10-year average, rain forecast, wind conditions, sunlight times, and an overall summary.
 
 ### Plot a specific station
 
@@ -53,7 +53,10 @@ fish Paris --tomorrow
 - Water height table with current level and 10-year average per station
 - 3-month terminal graph (braille characters via plotext)
 - Rain forecast from [Open-Meteo](https://open-meteo.com/)
+- Wind forecast with fly fishing color coding (green/yellow/red based on speed and gusts)
+- Non-fishable hours (outside sunrise to sunset +/- 30 min) are dimmed
 - Sunrise/sunset and peak sunlight window
+- One-line summary: levels vs average, total rain, wind verdict
 - Historical average cache (`~/.cache/fish/hist_avg.json`), invalidated yearly
 - Geocoding via the [French address API](https://adresse.data.gouv.fr/)
 
