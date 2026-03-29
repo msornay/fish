@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fish"
+version = "1.0.0"
+description = "French river water height CLI tool"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx",
+    "plotext",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+fish = "fish:main"

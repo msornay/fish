@@ -9,7 +9,7 @@ Shows water levels, 10-year historical averages, rain forecasts, wind conditions
 ## Installation
 
 ```bash
-pip install httpx plotext
+pip install .
 ```
 
 ## Usage
@@ -63,7 +63,7 @@ fish Paris --tomorrow
 ## Development
 
 ```bash
-pip install httpx plotext pytest ruff
+pip install -e .[dev]
 pytest test_fish.py -v
 ruff check .
 ```

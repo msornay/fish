@@ -12,5 +12,4 @@ lint: docker-build
 	docker run --rm $(IMAGE) sh -c "ruff check . && ruff format --check ."
 
 deploy:
-	ln -sf $(CURDIR)/fish.py $(HOME)/venv/fish/bin/fish
-	chmod +x $(HOME)/venv/fish/bin/fish
+	. $(HOME)/venv/fish/bin/activate && pip install -e $(CURDIR)
