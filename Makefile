@@ -12,4 +12,5 @@ lint: docker-build
 	docker run --rm $(IMAGE) sh -c "ruff check . && ruff format --check ."
 
 deploy:
-	@echo "fish is a local CLI tool — no remote deployment configured."
+	ln -sf $(CURDIR)/fish.py $(HOME)/venv/fish/bin/fish
+	chmod +x $(HOME)/venv/fish/bin/fish
