@@ -753,13 +753,102 @@ def test_is_fishable_hour_just_outside_margin():
     assert fish.is_fishable_hour("20:31", "07:00", "20:00") is False
 
 
+# --- technique_verdicts ---
+
+
+def _make_hours(wind=5.0, gust=8.0, precip=0.0, fishable=True):
+    """Build a single-hour list for technique_verdicts tests."""
+    return [
+        {
+            "hour": "10:00",
+            "wind_kmh": wind,
+            "wind_gust_kmh": gust,
+            "precipitation": precip,
+            "fishable": fishable,
+        }
+    ]
+
+
+def test_technique_verdicts_all_go():
+    result = fish.technique_verdicts(_make_hours(5, 8, 0.0), weathercode=1)
+    assert set(result.values()) == {"go"}
+    assert len(result) == len(fish.TECHNIQUES)
+
+
+def test_technique_verdicts_thunderstorm():
+    result = fish.technique_verdicts(_make_hours(5, 8, 0.0), weathercode=95)
+    assert all(v == "no-go" for v in result.values())
+
+
+def test_technique_verdicts_hard_stop_gust():
+    result = fish.technique_verdicts(_make_hours(40, 75, 0.0), weathercode=1)
+    assert all(v == "no-go" for v in result.values())
+
+
+def test_technique_verdicts_hard_stop_precip():
+    result = fish.technique_verdicts(_make_hours(5, 8, 9.0), weathercode=1)
+    assert all(v == "no-go" for v in result.values())
+
+
+def test_technique_verdicts_precip_difficult():
+    result = fish.technique_verdicts(_make_hours(5, 8, 5.0), weathercode=1)
+    assert all(v in ("difficult", "no-go") for v in result.values())
+    assert result["Toc"] == "difficult"
+
+
+def test_technique_verdicts_precip_below_cap():
+    result = fish.technique_verdicts(_make_hours(5, 8, 3.9), weathercode=1)
+    assert all(v == "go" for v in result.values())
+
+
+def test_technique_verdicts_mouche_seche_nogo():
+    result = fish.technique_verdicts(_make_hours(26, 20, 0.0), weathercode=1)
+    assert result["Mouche sèche"] == "no-go"
+    assert result["Mouche nymphe"] == "difficult"
+    assert result["Toc"] == "difficult"
+    assert result["Silure au posé"] == "go"
+
+
+def test_technique_verdicts_non_fishable_ignored():
+    result = fish.technique_verdicts(
+        _make_hours(50, 80, 20.0, fishable=False), weathercode=1
+    )
+    assert all(v == "go" for v in result.values())
+
+
+def test_technique_verdicts_graduated():
+    hours = [
+        {
+            "hour": "10:00",
+            "wind_kmh": 32,
+            "wind_gust_kmh": 48,
+            "precipitation": 0.0,
+            "fishable": True,
+        }
+    ]
+    result = fish.technique_verdicts(hours, weathercode=1)
+    assert result["Mouche sèche"] == "no-go"
+    assert result["Mouche nymphe"] == "no-go"
+    assert result["Lancer UL"] == "no-go"
+    assert result["Leurre 7g+"] == "difficult"
+    assert result["Toc"] == "difficult"
+    assert result["Silure au posé"] == "go"
+
+
+def test_technique_verdicts_silure_resilient():
+    result = fish.technique_verdicts(_make_hours(45, 55, 0.0), weathercode=1)
+    assert result["Silure au posé"] == "difficult"
+    assert result["Silure au posé"] != "no-go"
+
+
 # --- print_wind_section ---
 
 
-def _make_wind_day(hours, verdict="Great for casting"):
+def _make_wind_day(hours, verdict="Great for casting", technique_verdicts=None):
     """Helper: build a forecast day dict for wind section tests."""
     return {
         "wind_verdict": verdict,
+        "technique_verdicts": technique_verdicts or {},
         "hourly": [
             {
                 "hour": h[0],
@@ -836,6 +925,24 @@ def test_wind_section_overall_red():
         fish.print_wind_section(day, is_today=True)
         output = out.getvalue()
     assert "Too windy for fly fishing" in output
+
+
+def test_wind_section_shows_technique_verdicts():
+    verdicts = {t: "go" for t in fish.TECHNIQUES}
+    verdicts["Mouche sèche"] = "no-go"
+    verdicts["Lancer UL"] = "difficult"
+    day = _make_wind_day(
+        [("10:00", 30.0, 45.0, "W")],
+        technique_verdicts=verdicts,
+    )
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_wind_section(day, is_today=True)
+        output = out.getvalue()
+    assert "Techniques:" in output
+    assert "Mouche" in output
+    assert "No-go" in output
+    assert "Difficult" in output
+    assert "Go" in output
 
 
 def test_wind_section_dims_non_fishable():
@@ -917,6 +1024,36 @@ def test_summary_wind_red():
         fish.print_summary(rows, day)
         output = out.getvalue()
     assert "Too windy" in output
+
+
+def test_summary_shows_avoid_when_some_nogo():
+    rows = [("R", "S", "X", 500.0, 500.0, 5)]
+    verdicts = {t: "go" for t in fish.TECHNIQUES}
+    verdicts["Mouche sèche"] = "no-go"
+    day = {
+        "wind_verdict": "Challenging conditions",
+        "hourly": [{"hour": "10:00", "precipitation": 0.0, "fishable": True}],
+        "technique_verdicts": verdicts,
+    }
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_summary(rows, day)
+        output = out.getvalue()
+    assert "Avoid" in output
+    assert "Mouche" in output
+
+
+def test_summary_all_nogo():
+    rows = [("R", "S", "X", 500.0, 500.0, 5)]
+    verdicts = {t: "no-go" for t in fish.TECHNIQUES}
+    day = {
+        "wind_verdict": "Too windy for fly fishing",
+        "hourly": [{"hour": "10:00", "precipitation": 0.0, "fishable": True}],
+        "technique_verdicts": verdicts,
+    }
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_summary(rows, day)
+        output = out.getvalue()
+    assert "No technique practicable" in output
 
 
 # --- --json flag ---
@@ -1364,6 +1501,18 @@ def test_fetch_daily_forecast_parses(mock_get):
     assert h0["cloudcover"] == 30
     assert "fishable" in h0
     assert "wind_verdict" in day0
+    # Technique verdicts present and correct for calm day0
+    assert "technique_verdicts" in day0
+    assert all(v == "go" for v in day0["technique_verdicts"].values())
+    # Day1 has wind 20-22, gusts 30-35: mouche seche should be difficult
+    # (wind < 25 no-go threshold, gust 35 >= 25 difficult threshold)
+    day1 = result[1]
+    assert day1["technique_verdicts"]["Mouche sèche"] == "difficult"
+    # Thresholds metadata present
+    assert "thresholds" in day0
+    assert day0["thresholds"]["wind_unit"] == "km/h"
+    assert day0["thresholds"]["precip_unit"] == "mm/h"
+    assert "techniques" in day0["thresholds"]
 
 
 @patch("fish.httpx.get")

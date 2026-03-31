@@ -356,6 +356,100 @@ def wind_color(speed: float, gust: float) -> str:
     return "green"
 
 
+# Technique-specific thresholds.
+# Wind/gust in km/h. Precipitation in mm/h (universal, not per-technique).
+TECHNIQUES = (
+    "Mouche sèche",
+    "Mouche nymphe",
+    "Lancer UL",
+    "Leurre 7g+",
+    "Toc",
+    "Silure au posé",
+)
+
+_TECHNIQUE_THRESHOLDS = {
+    "Mouche sèche": {
+        "difficult": {"wind": 15, "gust": 25},
+        "no-go": {"wind": 25, "gust": 40},
+    },
+    "Mouche nymphe": {
+        "difficult": {"wind": 20, "gust": 30},
+        "no-go": {"wind": 30, "gust": 45},
+    },
+    "Lancer UL": {
+        "difficult": {"wind": 20, "gust": 35},
+        "no-go": {"wind": 30, "gust": 50},
+    },
+    "Leurre 7g+": {
+        "difficult": {"wind": 30, "gust": 45},
+        "no-go": {"wind": 45, "gust": 60},
+    },
+    "Toc": {
+        "difficult": {"wind": 25, "gust": 40},
+        "no-go": {"wind": 40, "gust": 60},
+    },
+    "Silure au posé": {
+        "difficult": {"wind": 35, "gust": 50},
+        "no-go": {"wind": 50, "gust": 70},
+    },
+}
+_HARD_STOP_GUST = 70  # km/h
+_PRECIP_DIFFICULT = 4  # mm/h
+_PRECIP_NOGO = 8  # mm/h
+_THUNDERSTORM_CODES = {95, 96, 99}
+
+_VERDICT_SEVERITY = {"go": 0, "difficult": 1, "no-go": 2}
+
+
+def _worst_verdict(a: str, b: str) -> str:
+    return a if _VERDICT_SEVERITY[a] >= _VERDICT_SEVERITY[b] else b
+
+
+def technique_verdicts(hours: list[dict], weathercode: int) -> dict[str, str]:
+    """Compute per-technique go/difficult/no-go from hourly weather data."""
+    if weathercode in _THUNDERSTORM_CODES:
+        return {t: "no-go" for t in TECHNIQUES}
+
+    fishable = [h for h in hours if h.get("fishable", True)]
+    if not fishable:
+        return {t: "go" for t in TECHNIQUES}
+
+    # Check hard stops across all fishable hours
+    for h in fishable:
+        if h["wind_gust_kmh"] > _HARD_STOP_GUST or h["precipitation"] >= _PRECIP_NOGO:
+            return {t: "no-go" for t in TECHNIQUES}
+
+    # Precipitation verdict (universal)
+    precip_verdict = "go"
+    for h in fishable:
+        if h["precipitation"] >= _PRECIP_DIFFICULT:
+            precip_verdict = "difficult"
+            break
+
+    # Per-technique wind verdict
+    result = {}
+    for tech in TECHNIQUES:
+        thresholds = _TECHNIQUE_THRESHOLDS[tech]
+        wind_verdict = "go"
+        for h in fishable:
+            speed = h["wind_kmh"]
+            gust = h["wind_gust_kmh"]
+            if (
+                speed >= thresholds["no-go"]["wind"]
+                or gust >= thresholds["no-go"]["gust"]
+            ):
+                wind_verdict = "no-go"
+                break
+            if (
+                speed >= thresholds["difficult"]["wind"]
+                or gust >= thresholds["difficult"]["gust"]
+            ):
+                wind_verdict = _worst_verdict(wind_verdict, "difficult")
+        result[tech] = _worst_verdict(wind_verdict, precip_verdict)
+
+    return result
+
+
 def fetch_daily_forecast(
     lat: float,
     lon: float,
@@ -451,6 +545,8 @@ def fetch_daily_forecast(
                     c = wind_color(h["wind_kmh"], h["wind_gust_kmh"])
                     if _WIND_SEVERITY[c] > _WIND_SEVERITY[worst]:
                         worst = c
+            wcode = daily["weathercode"][i]
+            verdicts = technique_verdicts(hours, wcode)
             result.append(
                 {
                     "date": d,
@@ -461,12 +557,23 @@ def fetch_daily_forecast(
                     "wind_direction_dominant": (
                         degrees_to_compass(daily["winddirection_10m_dominant"][i])
                     ),
-                    "weathercode": daily["weathercode"][i],
+                    "weathercode": wcode,
                     "sunrise": sr,
                     "sunset": ss,
                     "peak_start": f"{(noon_min - 120) // 60:02d}:{(noon_min - 120) % 60:02d}",
                     "peak_end": f"{(noon_min + 120) // 60:02d}:{(noon_min + 120) % 60:02d}",
                     "wind_verdict": _WIND_VERDICTS[worst],
+                    "technique_verdicts": verdicts,
+                    "thresholds": {
+                        "wind_unit": "km/h",
+                        "gust_unit": "km/h",
+                        "precip_unit": "mm/h",
+                        "precip_difficult": _PRECIP_DIFFICULT,
+                        "precip_nogo": _PRECIP_NOGO,
+                        "techniques": {
+                            name: _TECHNIQUE_THRESHOLDS[name] for name in TECHNIQUES
+                        },
+                    },
                     "hourly": hours,
                 }
             )
@@ -630,6 +737,17 @@ def print_wind_section(day: dict, is_today: bool) -> None:
             verdict_color = k
             break
     print(f"  {BOLD}Overall:{RESET} {_WIND_ANSI[verdict_color]}{verdict}{RESET}")
+
+    # Technique verdicts
+    verdicts = day.get("technique_verdicts", {})
+    if verdicts:
+        _VERDICT_ANSI = {"go": GREEN, "difficult": YELLOW, "no-go": RED}
+        _VERDICT_LABEL = {"go": "Go", "difficult": "Difficult", "no-go": "No-go"}
+        print(f"  {BOLD}Techniques:{RESET}")
+        for tech, v in verdicts.items():
+            color = _VERDICT_ANSI[v]
+            label = _VERDICT_LABEL[v]
+            print(f"    {color}●{RESET} {tech}: {color}{label}{RESET}")
     print()
 
 
@@ -672,6 +790,16 @@ def print_summary(
                 verdict_color = k
                 break
         parts.append(f"{_WIND_ANSI[verdict_color]}{verdict}{RESET}")
+
+        verdicts = day.get("technique_verdicts", {})
+        if verdicts:
+            nogo = [t for t, v in verdicts.items() if v == "no-go"]
+            difficult = [t for t, v in verdicts.items() if v == "difficult"]
+            if len(nogo) == len(verdicts):
+                parts.append(f"{RED}No technique practicable{RESET}")
+            elif nogo or difficult:
+                avoid = nogo + difficult
+                parts.append(f"{YELLOW}Avoid: {', '.join(avoid)}{RESET}")
 
     print()
     print(f"  {GREEN}>>{RESET} {' | '.join(parts)}")
