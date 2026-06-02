@@ -908,7 +908,7 @@ def test_is_fishable_hour_just_outside_margin():
 # --- technique_verdicts ---
 
 
-def _make_hours(wind=5.0, gust=8.0, precip=0.0, fishable=True):
+def _make_hours(wind=5.0, gust=8.0, precip=0.0, fishable=True, weathercode=1):
     """Build a single-hour list for technique_verdicts tests."""
     return [
         {
@@ -917,44 +917,54 @@ def _make_hours(wind=5.0, gust=8.0, precip=0.0, fishable=True):
             "wind_gust_kmh": gust,
             "precipitation": precip,
             "fishable": fishable,
+            "weathercode": weathercode,
         }
     ]
 
 
 def test_technique_verdicts_all_go():
-    result = fish.technique_verdicts(_make_hours(5, 8, 0.0), weathercode=1)
+    result = fish.technique_verdicts(_make_hours(5, 8, 0.0))
     assert set(result.values()) == {"go"}
     assert len(result) == len(fish.TECHNIQUES)
 
 
-def test_technique_verdicts_thunderstorm():
-    result = fish.technique_verdicts(_make_hours(5, 8, 0.0), weathercode=95)
+def test_technique_verdicts_thunderstorm_during_fishable_hours():
+    result = fish.technique_verdicts(_make_hours(5, 8, 0.0, weathercode=95))
     assert all(v == "no-go" for v in result.values())
 
 
+def test_technique_verdicts_thunderstorm_outside_fishable_hours():
+    # A storm overnight (non-fishable) must not blanket the fishable window.
+    hours = _make_hours(5, 8, 0.0, fishable=False, weathercode=95) + _make_hours(
+        5, 8, 0.0, fishable=True, weathercode=1
+    )
+    result = fish.technique_verdicts(hours)
+    assert all(v == "go" for v in result.values())
+
+
 def test_technique_verdicts_hard_stop_gust():
-    result = fish.technique_verdicts(_make_hours(40, 75, 0.0), weathercode=1)
+    result = fish.technique_verdicts(_make_hours(40, 75, 0.0))
     assert all(v == "no-go" for v in result.values())
 
 
 def test_technique_verdicts_hard_stop_precip():
-    result = fish.technique_verdicts(_make_hours(5, 8, 9.0), weathercode=1)
+    result = fish.technique_verdicts(_make_hours(5, 8, 9.0))
     assert all(v == "no-go" for v in result.values())
 
 
 def test_technique_verdicts_precip_difficult():
-    result = fish.technique_verdicts(_make_hours(5, 8, 5.0), weathercode=1)
+    result = fish.technique_verdicts(_make_hours(5, 8, 5.0))
     assert all(v in ("difficult", "no-go") for v in result.values())
     assert result["Toc"] == "difficult"
 
 
 def test_technique_verdicts_precip_below_cap():
-    result = fish.technique_verdicts(_make_hours(5, 8, 3.9), weathercode=1)
+    result = fish.technique_verdicts(_make_hours(5, 8, 3.9))
     assert all(v == "go" for v in result.values())
 
 
 def test_technique_verdicts_mouche_seche_nogo():
-    result = fish.technique_verdicts(_make_hours(26, 20, 0.0), weathercode=1)
+    result = fish.technique_verdicts(_make_hours(26, 20, 0.0))
     assert result["Mouche sèche"] == "no-go"
     assert result["Mouche nymphe"] == "difficult"
     assert result["Toc"] == "difficult"
@@ -962,9 +972,7 @@ def test_technique_verdicts_mouche_seche_nogo():
 
 
 def test_technique_verdicts_non_fishable_ignored():
-    result = fish.technique_verdicts(
-        _make_hours(50, 80, 20.0, fishable=False), weathercode=1
-    )
+    result = fish.technique_verdicts(_make_hours(50, 80, 20.0, fishable=False))
     assert all(v == "go" for v in result.values())
 
 
@@ -976,9 +984,10 @@ def test_technique_verdicts_graduated():
             "wind_gust_kmh": 48,
             "precipitation": 0.0,
             "fishable": True,
+            "weathercode": 1,
         }
     ]
-    result = fish.technique_verdicts(hours, weathercode=1)
+    result = fish.technique_verdicts(hours)
     assert result["Mouche sèche"] == "no-go"
     assert result["Mouche nymphe"] == "no-go"
     assert result["Lancer UL"] == "no-go"
@@ -988,7 +997,7 @@ def test_technique_verdicts_graduated():
 
 
 def test_technique_verdicts_silure_resilient():
-    result = fish.technique_verdicts(_make_hours(45, 55, 0.0), weathercode=1)
+    result = fish.technique_verdicts(_make_hours(45, 55, 0.0))
     assert result["Silure au posé"] == "difficult"
     assert result["Silure au posé"] != "no-go"
 
@@ -1327,7 +1336,7 @@ def test_location_json_full(
     assert day0["wind_verdict"] == "Great for casting"
     assert day0["hourly"][0]["fishable"] is True
     # Default days=1 when --days not specified
-    mock_daily.assert_called_once_with(45.75, 4.85, 1)
+    mock_daily.assert_called_once_with(45.75, 4.85, 1, start_date=None)
 
 
 @patch("fish.fetch_daily_forecast")
@@ -1715,6 +1724,121 @@ def test_fetch_daily_forecast_parses(mock_get):
 
 
 @patch("fish.httpx.get")
+def test_fetch_daily_forecast_storm_outside_fishable_not_nogo(mock_get):
+    # Daily weathercode is a daily-max aggregate: a 03:00 storm stamps 95 on
+    # the whole day. The fishable daytime hours here are calm and clear, so the
+    # day must NOT be blanket no-go. Verdicts must come from hourly weathercode.
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {
+        "daily": {
+            "time": ["2026-06-04"],
+            "temperature_2m_max": [20.0],
+            "temperature_2m_min": [10.0],
+            "precipitation_sum": [2.0],
+            "windspeed_10m_max": [12.0],
+            "winddirection_10m_dominant": [180],
+            "weathercode": [95],
+            "sunrise": ["2026-06-04T06:00"],
+            "sunset": ["2026-06-04T21:00"],
+        },
+        "hourly": {
+            "time": ["2026-06-04T03:00", "2026-06-04T12:00"],
+            "temperature_2m": [11.0, 19.0],
+            "precipitation": [1.0, 0.0],
+            "windspeed_10m": [6.0, 8.0],
+            "wind_gusts_10m": [12.0, 14.0],
+            "wind_direction_10m": [180, 200],
+            "cloudcover": [90, 20],
+            "pressure_msl": [1010.0, 1012.0],
+            "weathercode": [95, 1],
+        },
+    }
+    mock_get.return_value = resp
+    result = fish.fetch_daily_forecast(45.0, 3.0, 1)
+    verdicts = result[0]["technique_verdicts"]
+    # 03:00 storm is outside the fishable window; midday is calm and clear.
+    assert not all(v == "no-go" for v in verdicts.values())
+
+
+@patch("fish.httpx.get")
+def test_fetch_daily_forecast_storm_during_fishable_is_nogo(mock_get):
+    # A storm during the fishable window must still blanket the day no-go.
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {
+        "daily": {
+            "time": ["2026-06-04"],
+            "temperature_2m_max": [20.0],
+            "temperature_2m_min": [10.0],
+            "precipitation_sum": [2.0],
+            "windspeed_10m_max": [12.0],
+            "winddirection_10m_dominant": [180],
+            "weathercode": [95],
+            "sunrise": ["2026-06-04T06:00"],
+            "sunset": ["2026-06-04T21:00"],
+        },
+        "hourly": {
+            "time": ["2026-06-04T03:00", "2026-06-04T12:00"],
+            "temperature_2m": [11.0, 19.0],
+            "precipitation": [0.0, 1.0],
+            "windspeed_10m": [6.0, 8.0],
+            "wind_gusts_10m": [12.0, 14.0],
+            "wind_direction_10m": [180, 200],
+            "cloudcover": [20, 90],
+            "pressure_msl": [1012.0, 1010.0],
+            "weathercode": [1, 95],
+        },
+    }
+    mock_get.return_value = resp
+    result = fish.fetch_daily_forecast(45.0, 3.0, 1)
+    verdicts = result[0]["technique_verdicts"]
+    assert all(v == "no-go" for v in verdicts.values())
+
+
+@patch("fish.httpx.get")
+def test_fetch_daily_forecast_future_uses_start_date(mock_get):
+    # A future target date must be honored: the forecast API (not archive) is
+    # queried with start_date/end_date, not forecast_days from today.
+    future = date.today() + timedelta(days=3)
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {
+        "daily": {
+            "time": [future.isoformat()],
+            "temperature_2m_max": [20.0],
+            "temperature_2m_min": [10.0],
+            "precipitation_sum": [0.0],
+            "windspeed_10m_max": [10.0],
+            "winddirection_10m_dominant": [180],
+            "weathercode": [1],
+            "sunrise": [f"{future.isoformat()}T06:00"],
+            "sunset": [f"{future.isoformat()}T21:00"],
+        },
+        "hourly": {
+            "time": [f"{future.isoformat()}T12:00"],
+            "temperature_2m": [18.0],
+            "precipitation": [0.0],
+            "windspeed_10m": [8.0],
+            "wind_gusts_10m": [12.0],
+            "wind_direction_10m": [180],
+            "cloudcover": [20],
+            "pressure_msl": [1015.0],
+            "weathercode": [1],
+        },
+    }
+    mock_get.return_value = resp
+    result = fish.fetch_daily_forecast(45.0, 3.0, 1, start_date=future)
+    call_url = mock_get.call_args[0][0]
+    params = mock_get.call_args[1]["params"]
+    assert "archive" not in call_url
+    assert params.get("start_date") == future.isoformat()
+    assert params.get("end_date") == future.isoformat()
+    assert "forecast_days" not in params
+    assert result[0]["date"] == future.isoformat()
+
+
+@patch("fish.httpx.get")
 def test_fetch_daily_forecast_empty_on_network_error(mock_get):
     mock_get.side_effect = httpx.ConnectError("network error")
     result = fish.fetch_daily_forecast(45.0, 3.0, 7)
@@ -1832,7 +1956,7 @@ def test_location_json_with_days(
     assert result["forecast"][0]["date"] == "2026-03-29"
     assert result["forecast"][0]["temp_max"] == 15.0
     assert result["forecast"][0]["wind_verdict"] == "Great for casting"
-    mock_daily.assert_called_once_with(45.0, 3.0, 3)
+    mock_daily.assert_called_once_with(45.0, 3.0, 3, start_date=None)
 
 
 @patch("fish.fetch_daily_forecast")
@@ -1870,4 +1994,44 @@ def test_location_json_without_days_defaults_to_one(
             fish.main()
     result = json.loads(out.getvalue())
     assert "forecast" in result
-    mock_daily.assert_called_once_with(45.0, 3.0, 1)
+    mock_daily.assert_called_once_with(45.0, 3.0, 1, start_date=None)
+
+
+@patch("fish.fetch_daily_forecast")
+@patch("fish.save_cache")
+@patch("fish.load_cache")
+@patch("fish.fetch_station_data")
+@patch("fish.fetch_today_level")
+@patch("fish.search_stations_nearby")
+@patch("fish.geocode")
+def test_location_json_date_passes_start_date(
+    mock_geo,
+    mock_nearby,
+    mock_today,
+    mock_data,
+    mock_cache,
+    mock_save,
+    mock_daily,
+):
+    # --json with --date must forward the requested date to the forecast fetch,
+    # not silently return today's forecast.
+    mock_geo.return_value = (45.0, 3.0)
+    mock_nearby.return_value = [
+        {"code_station": "X1", "libelle_station": "S", "libelle_cours_eau": "R"},
+    ]
+    mock_today.return_value = 500.0
+    mock_data.return_value = {
+        "dates": [],
+        "values": [],
+        "grandeur": "",
+        "avg": None,
+        "avg_count": 0,
+    }
+    mock_cache.return_value = {"year": 2026, "data": {}}
+    mock_daily.return_value = [{"date": "2026-06-04", "temp_max": 20.0}]
+    target = date.today() + timedelta(days=2)
+    with patch("sys.argv", ["fish", "Test", "--json", "--date", target.isoformat()]):
+        with patch("sys.stdout", new_callable=StringIO) as out:
+            fish.main()
+    json.loads(out.getvalue())
+    mock_daily.assert_called_once_with(45.0, 3.0, 1, start_date=target)

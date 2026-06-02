@@ -457,14 +457,21 @@ def _worst_verdict(a: str, b: str) -> str:
     return a if _VERDICT_SEVERITY[a] >= _VERDICT_SEVERITY[b] else b
 
 
-def technique_verdicts(hours: list[dict], weathercode: int) -> dict[str, str]:
-    """Compute per-technique go/difficult/no-go from hourly weather data."""
-    if weathercode in _THUNDERSTORM_CODES:
-        return {t: "no-go" for t in TECHNIQUES}
+def technique_verdicts(hours: list[dict]) -> dict[str, str]:
+    """Compute per-technique go/difficult/no-go from hourly weather data.
 
+    Thunderstorms are evaluated per fishable hour using each hour's own
+    weathercode. A storm outside the fishable window (e.g. overnight) does not
+    blanket the day, unlike the coarse daily-max weathercode aggregate.
+    """
     fishable = [h for h in hours if h.get("fishable", True)]
     if not fishable:
         return {t: "go" for t in TECHNIQUES}
+
+    # Thunderstorm during a fishable hour is a hard stop for every technique.
+    for h in fishable:
+        if h.get("weathercode") in _THUNDERSTORM_CODES:
+            return {t: "no-go" for t in TECHNIQUES}
 
     # Check hard stops across all fishable hours
     for h in fishable:
@@ -523,13 +530,20 @@ def fetch_daily_forecast(
     hourly_params = (
         "temperature_2m,precipitation,"
         "windspeed_10m,wind_gusts_10m,wind_direction_10m,"
-        "cloudcover,pressure_msl"
+        "cloudcover,pressure_msl,weathercode"
     )
     try:
-        use_archive = start_date is not None and start_date < date.today()
-        if use_archive:
+        # A target date is honored via start_date/end_date on whichever API:
+        # past dates use the archive, today/future use the forecast endpoint.
+        # Only fall back to forecast_days when no date is requested.
+        if start_date is not None:
+            use_archive = start_date < date.today()
             end = start_date + timedelta(days=days - 1)
-            url = "https://archive-api.open-meteo.com/v1/archive"
+            url = (
+                "https://archive-api.open-meteo.com/v1/archive"
+                if use_archive
+                else "https://api.open-meteo.com/v1/forecast"
+            )
             params: dict = {
                 "latitude": lat,
                 "longitude": lon,
@@ -565,6 +579,7 @@ def fetch_daily_forecast(
         h_dirs = hourly.get("wind_direction_10m", [])
         h_cloud = hourly.get("cloudcover", [])
         h_pressure = hourly.get("pressure_msl", [])
+        h_wcode = hourly.get("weathercode", [])
         for i, t in enumerate(h_times):
             d, hm = t.split("T")
             dir_deg = h_dirs[i] if i < len(h_dirs) else 0
@@ -579,6 +594,7 @@ def fetch_daily_forecast(
                     "direction_compass": degrees_to_compass(dir_deg),
                     "cloudcover": h_cloud[i],
                     "pressure_hpa": (h_pressure[i] if i < len(h_pressure) else None),
+                    "weathercode": (h_wcode[i] if i < len(h_wcode) else None),
                 }
             )
 
@@ -601,7 +617,7 @@ def fetch_daily_forecast(
                     if _WIND_SEVERITY[c] > _WIND_SEVERITY[worst]:
                         worst = c
             wcode = daily["weathercode"][i]
-            verdicts = technique_verdicts(hours, wcode)
+            verdicts = technique_verdicts(hours)
             # Derive wind verdict from technique verdicts
             if verdicts:
                 technique_worst = max(
@@ -1058,7 +1074,9 @@ def main() -> None:
                     "location": args.location,
                     "coordinates": {"lat": lat, "lon": lon},
                     "stations": json_stations,
-                    "forecast": fetch_daily_forecast(lat, lon, days),
+                    "forecast": fetch_daily_forecast(
+                        lat, lon, days, start_date=target_date
+                    ),
                 },
                 ensure_ascii=False,
             )
