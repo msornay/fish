@@ -12,9 +12,10 @@ import httpx
 import plotext as plt
 
 CACHE_PATH = Path.home() / ".cache" / "fish" / "hist_avg.json"
+GEOCODE_CACHE_PATH = Path.home() / ".cache" / "fish" / "geocode.json"
 
 BASE = "https://hubeau.eaufrance.fr/api/v2/hydrometrie"
-GEOCODE_URL = "https://api-adresse.data.gouv.fr/search/"
+GEOCODE_URL = "https://nominatim.openstreetmap.org/search"
 TIMEOUT = 30
 
 # ANSI escape codes
@@ -27,19 +28,43 @@ RED = "\033[31m"
 RESET = "\033[0m"
 
 
+def load_geocode_cache() -> dict[str, list[float]]:
+    try:
+        return json.loads(GEOCODE_CACHE_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_geocode_cache(cache: dict[str, list[float]]) -> None:
+    GEOCODE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    GEOCODE_CACHE_PATH.write_text(json.dumps(cache))
+
+
 def geocode(location: str) -> tuple[float, float]:
-    """Geocode a location name using the French address API. Returns (lat, lon)."""
+    """Geocode a location name using Nominatim (OSM). Returns (lat, lon)."""
+    key = location.strip().lower()
+    cache = load_geocode_cache()
+    if key in cache:
+        return cache[key][0], cache[key][1]
     resp = httpx.get(
         GEOCODE_URL,
-        params={"q": location, "limit": 1},
+        params={
+            "q": location,
+            "format": "json",
+            "limit": 1,
+            "countrycodes": "fr",
+        },
+        headers={"User-Agent": "fish-cli/1.0"},
         timeout=TIMEOUT,
     )
     resp.raise_for_status()
-    features = resp.json().get("features", [])
-    if not features:
+    results = resp.json()
+    if not results:
         print(f"Could not geocode '{location}'.", file=sys.stderr)
         sys.exit(1)
-    lon, lat = features[0]["geometry"]["coordinates"]
+    lat, lon = float(results[0]["lat"]), float(results[0]["lon"])
+    cache[key] = [lat, lon]
+    save_geocode_cache(cache)
     return lat, lon
 
 
@@ -132,11 +157,18 @@ def pick_height_grandeur(obs: list[dict]) -> str | None:
     return None
 
 
-def fetch_date_level(code: str, target_date: date) -> float | None:
-    """Fetch the elaborated daily water height for a specific date."""
+def fetch_date_level(
+    code: str, target_date: date, grandeur: str | None = None
+) -> float | None:
+    """Fetch the elaborated daily water height for a specific date.
+
+    If grandeur is given, returns that grandeur's value; otherwise picks the
+    best available height grandeur from the day's data.
+    """
     d = target_date.isoformat()
-    obs = fetch_obs_elab(code, d, d)
-    grandeur = pick_height_grandeur(obs)
+    obs = fetch_obs_elab(code, d, d, grandeur=grandeur)
+    if not grandeur:
+        grandeur = pick_height_grandeur(obs)
     if not grandeur:
         return None
     for o in obs:
@@ -339,6 +371,26 @@ def _hhmm_to_minutes(hhmm: str) -> int:
     return int(h) * 60 + int(m)
 
 
+_PRESSURE_TREND_THRESHOLD = 1.0  # hPa over 3h
+
+
+def annotate_pressure_trend(hours: list[dict]) -> None:
+    """Annotate each hourly dict with pressure_trend label (rising/falling/stable)."""
+    for i, h in enumerate(hours):
+        cur = h.get("pressure_hpa")
+        prev = hours[i - 3].get("pressure_hpa") if i >= 3 else None
+        if cur is None or prev is None:
+            h["pressure_trend"] = None
+            continue
+        delta = cur - prev
+        if delta > _PRESSURE_TREND_THRESHOLD:
+            h["pressure_trend"] = "rising"
+        elif delta < -_PRESSURE_TREND_THRESHOLD:
+            h["pressure_trend"] = "falling"
+        else:
+            h["pressure_trend"] = "stable"
+
+
 def is_fishable_hour(hour: str, sunrise: str, sunset: str) -> bool:
     """Check if an hour falls within the fishable window (sunrise-30min to sunset+30min)."""
     t = _hhmm_to_minutes(hour)
@@ -471,7 +523,7 @@ def fetch_daily_forecast(
     hourly_params = (
         "temperature_2m,precipitation,"
         "windspeed_10m,wind_gusts_10m,wind_direction_10m,"
-        "cloudcover"
+        "cloudcover,pressure_msl"
     )
     try:
         use_archive = start_date is not None and start_date < date.today()
@@ -512,6 +564,7 @@ def fetch_daily_forecast(
         h_gusts = hourly.get("wind_gusts_10m", [])
         h_dirs = hourly.get("wind_direction_10m", [])
         h_cloud = hourly.get("cloudcover", [])
+        h_pressure = hourly.get("pressure_msl", [])
         for i, t in enumerate(h_times):
             d, hm = t.split("T")
             dir_deg = h_dirs[i] if i < len(h_dirs) else 0
@@ -525,6 +578,7 @@ def fetch_daily_forecast(
                     "direction_deg": dir_deg,
                     "direction_compass": degrees_to_compass(dir_deg),
                     "cloudcover": h_cloud[i],
+                    "pressure_hpa": (h_pressure[i] if i < len(h_pressure) else None),
                 }
             )
 
@@ -537,6 +591,7 @@ def fetch_daily_forecast(
             ss_min = _hhmm_to_minutes(ss)
             noon_min = sr_min + (ss_min - sr_min) // 2
             hours = hourly_by_date.get(d, [])
+            annotate_pressure_trend(hours)
             # Mark fishable + compute worst wind during fishable hours
             worst = "green"
             for h in hours:
@@ -547,6 +602,17 @@ def fetch_daily_forecast(
                         worst = c
             wcode = daily["weathercode"][i]
             verdicts = technique_verdicts(hours, wcode)
+            # Derive wind verdict from technique verdicts
+            if verdicts:
+                technique_worst = max(
+                    verdicts.values(), key=lambda v: _VERDICT_SEVERITY[v]
+                )
+                verdict_map = {
+                    "go": "green",
+                    "difficult": "yellow",
+                    "no-go": "red",
+                }
+                worst = verdict_map[technique_worst]
             result.append(
                 {
                     "date": d,
@@ -663,28 +729,76 @@ def display(
         print(f"  {GREEN}>>{RESET} No historical data available for {label}.")
 
 
-def fetch_today_level(code: str) -> float | None:
-    """Fetch the latest real-time water height for a station."""
-    resp = httpx.get(
-        f"{BASE}/observations_tr",
-        params={
-            "code_entite": code,
-            "grandeur_hydro": "H",
-            "size": 1,
-            "sort": "desc",
-            "format": "json",
-        },
-        timeout=TIMEOUT,
-    )
-    resp.raise_for_status()
-    data = resp.json().get("data", [])
-    if data and data[0].get("resultat_obs") is not None:
-        return data[0]["resultat_obs"]
-    return None
+def fetch_today_level(code: str, grandeur: str | None = None) -> float | None:
+    """Fetch today's water height for a station.
+
+    Without grandeur, returns the latest instant real-time reading.
+    With grandeur, aggregates today's real-time observations so the value is
+    comparable to the elaborated grandeur (HmnJ→mean, HINnJ→min, HIXnJ→max).
+    """
+    if not grandeur:
+        resp = httpx.get(
+            f"{BASE}/observations_tr",
+            params={
+                "code_entite": code,
+                "grandeur_hydro": "H",
+                "size": 1,
+                "sort": "desc",
+                "format": "json",
+            },
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        if data and data[0].get("resultat_obs") is not None:
+            return data[0]["resultat_obs"]
+        return None
+
+    today_iso = date.today().isoformat()
+    values: list[float] = []
+    url: str | None = None
+    while True:
+        if url:
+            resp = httpx.get(url, timeout=TIMEOUT)
+        else:
+            resp = httpx.get(
+                f"{BASE}/observations_tr",
+                params={
+                    "code_entite": code,
+                    "grandeur_hydro": "H",
+                    "date_debut_obs": f"{today_iso}T00:00:00",
+                    "size": 1000,
+                    "sort": "asc",
+                    "format": "json",
+                },
+                timeout=TIMEOUT,
+            )
+        resp.raise_for_status()
+        body = resp.json()
+        for o in body.get("data", []):
+            if o.get("resultat_obs") is not None:
+                values.append(o["resultat_obs"])
+        url = body.get("next")
+        if not url:
+            break
+    if not values:
+        # No real-time obs today yet (e.g. early morning, station gap).
+        # Fall back to latest instant reading so stations still display.
+        return fetch_today_level(code)
+    if grandeur == "HINnJ":
+        return min(values)
+    if grandeur == "HIXnJ":
+        return max(values)
+    if grandeur == "HmnJ":
+        return sum(values) / len(values)
+    return values[-1]
+
+
+_TREND_ARROW = {"rising": "↑", "falling": "↓", "stable": "→"}
 
 
 def print_rain_section(day: dict, is_today: bool) -> None:
-    """Print rain section from a forecast day dict."""
+    """Print rain + pressure section from a forecast day dict."""
     hours = day.get("hourly", [])
     if not hours:
         return
@@ -696,7 +810,13 @@ def print_rain_section(day: dict, is_today: bool) -> None:
         bar_len = round(mm / max_mm * 10) if max_mm > 0 and mm > 0 else 0
         color = CYAN if h.get("fishable", True) else DIM
         bar = f"{color}{'▇' * bar_len}{RESET}" if bar_len else ""
-        print(f"  {h['hour']}  {mm:4.1f} mm  {bar}")
+        p = h.get("pressure_hpa")
+        if p is not None:
+            arrow = _TREND_ARROW.get(h.get("pressure_trend"), " ")
+            pressure_str = f"{p:6.1f} hPa {arrow}"
+        else:
+            pressure_str = " " * 13
+        print(f"  {h['hour']}  {mm:4.1f} mm  {pressure_str}  {bar}")
     print()
 
 
@@ -729,15 +849,6 @@ def print_wind_section(day: dict, is_today: bool) -> None:
         print(
             f"  {h['hour']}  {speed:4.1f} km/h  {compass:2s}  gusts {gust:4.1f}  {bar}"
         )
-    verdict = day.get("wind_verdict", _WIND_VERDICTS["green"])
-    # Find the color for the verdict
-    verdict_color = "green"
-    for k, v in _WIND_VERDICTS.items():
-        if v == verdict:
-            verdict_color = k
-            break
-    print(f"  {BOLD}Overall:{RESET} {_WIND_ANSI[verdict_color]}{verdict}{RESET}")
-
     # Technique verdicts
     verdicts = day.get("technique_verdicts", {})
     if verdicts:
@@ -751,58 +862,50 @@ def print_wind_section(day: dict, is_today: bool) -> None:
     print()
 
 
-def print_summary(
-    rows: list[tuple[str, str, str, float | None, float | None, int]],
-    day: dict | None = None,
+def print_day_verdicts(
+    day: dict,
+    label: str | None = None,
+    rows: list[tuple[str, str, str, float | None, float | None, int]] | None = None,
 ) -> None:
-    """Print a one-line summary aggregating levels, rain, and wind."""
-    parts = []
+    """Print level/rain summary and per-technique verdicts for a day."""
+    _VERDICT_ANSI = {"go": GREEN, "difficult": YELLOW, "no-go": RED}
+    _VERDICT_LABEL = {"go": "Go", "difficult": "Difficult", "no-go": "No-go"}
+
+    prefix = f"  {DIM}({label}){RESET} " if label else "  "
+    info = []
 
     # Levels vs 10y average
-    ratios = []
-    for _, _, _, today_val, avg_val, _ in rows:
-        if today_val is not None and avg_val is not None and avg_val > 0:
-            ratios.append(today_val / avg_val)
-    if ratios:
-        pct = round((sum(ratios) / len(ratios) - 1) * 100)
-        if pct > 0:
-            parts.append(f"Levels +{pct}% above avg")
-        elif pct < 0:
-            parts.append(f"Levels {pct}% below avg")
-        else:
-            parts.append("Levels at avg")
+    if rows:
+        ratios = []
+        for _, _, _, today_val, avg_val, _ in rows:
+            if today_val is not None and avg_val is not None and avg_val > 0:
+                ratios.append(today_val / avg_val)
+        if ratios:
+            pct = round((sum(ratios) / len(ratios) - 1) * 100)
+            if pct > 0:
+                info.append(f"Levels +{pct}%")
+            elif pct < 0:
+                info.append(f"Levels {pct}%")
+            else:
+                info.append("Levels avg")
 
-    if day:
-        # Rain total (fishable hours only)
-        total_mm = sum(
-            h["precipitation"] for h in day.get("hourly", []) if h.get("fishable", True)
-        )
-        if total_mm > 0:
-            parts.append(f"Rain: {total_mm:.1f} mm")
-        else:
-            parts.append("Rain: dry")
+    # Rain total (fishable hours)
+    hours = day.get("hourly", [])
+    total_mm = sum(h["precipitation"] for h in hours if h.get("fishable", True))
+    if total_mm > 0:
+        info.append(f"Rain {total_mm:.1f} mm")
+    elif hours:
+        info.append("Dry")
 
-        # Wind verdict
-        verdict = day.get("wind_verdict", _WIND_VERDICTS["green"])
-        verdict_color = "green"
-        for k, v in _WIND_VERDICTS.items():
-            if v == verdict:
-                verdict_color = k
-                break
-        parts.append(f"{_WIND_ANSI[verdict_color]}{verdict}{RESET}")
-
-        verdicts = day.get("technique_verdicts", {})
-        if verdicts:
-            nogo = [t for t, v in verdicts.items() if v == "no-go"]
-            difficult = [t for t, v in verdicts.items() if v == "difficult"]
-            if len(nogo) == len(verdicts):
-                parts.append(f"{RED}No technique practicable{RESET}")
-            elif nogo or difficult:
-                avoid = nogo + difficult
-                parts.append(f"{YELLOW}Avoid: {', '.join(avoid)}{RESET}")
+    # Technique verdicts
+    verdicts = day.get("technique_verdicts", {})
+    for tech, v in verdicts.items():
+        color = _VERDICT_ANSI[v]
+        lab = _VERDICT_LABEL[v]
+        info.append(f"{color}{tech}: {lab}{RESET}")
 
     print()
-    print(f"  {GREEN}>>{RESET} {' | '.join(parts)}")
+    print(f"{prefix}{'  '.join(info)}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -909,10 +1012,15 @@ def main() -> None:
         name = station.get("libelle_station") or "?"
         river = station.get("libelle_cours_eau") or "?"
         try:
+            data = fetch_station_data(code, target_date, cache)
+        except (httpx.HTTPStatusError, httpx.TimeoutException):
+            data = {"avg": None, "avg_count": 0, "grandeur": ""}
+        grandeur = data.get("grandeur") or None
+        try:
             if target_date is None or target_date >= date.today():
-                today_val = fetch_today_level(code)
+                today_val = fetch_today_level(code, grandeur=grandeur)
             else:
-                today_val = fetch_date_level(code, target_date)
+                today_val = fetch_date_level(code, target_date, grandeur=grandeur)
         except (httpx.HTTPStatusError, httpx.TimeoutException):
             if not args.json_output:
                 print(
@@ -920,10 +1028,6 @@ def main() -> None:
                     file=sys.stderr,
                 )
             continue
-        try:
-            data = fetch_station_data(code, target_date, cache)
-        except (httpx.HTTPStatusError, httpx.TimeoutException):
-            data = {"avg": None, "avg_count": 0}
         rows.append((river, name, code, today_val, data["avg"], data["avg_count"]))
 
     save_cache(cache)
@@ -971,6 +1075,8 @@ def main() -> None:
 
     for i, day in enumerate(weather):
         if days > 1:
+            if i > 0:
+                print()
             print(f"  {BOLD}{day['date']}{RESET}")
         print_rain_section(day, is_today and i == 0)
         print_wind_section(day, is_today and i == 0)
@@ -981,8 +1087,14 @@ def main() -> None:
             f"  {YELLOW}☀{RESET}  Peak sunlight {day['peak_start']} – {day['peak_end']}"
         )
 
-    first_day = weather[0] if weather else None
-    print_summary(rows, first_day)
+    if weather:
+        if len(weather) > 1:
+            for i, day in enumerate(weather):
+                print_day_verdicts(
+                    day, label=day["date"], rows=rows if i == 0 else None
+                )
+        else:
+            print_day_verdicts(weather[0], rows=rows)
 
 
 if __name__ == "__main__":

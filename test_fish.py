@@ -167,18 +167,16 @@ def test_fetch_historical_average_no_data(mock_fetch):
 # --- geocode ---
 
 
-def _mock_geocode_response(features):
+def _mock_geocode_response(results):
     resp = MagicMock()
-    resp.json.return_value = {"features": features}
+    resp.json.return_value = results
     resp.raise_for_status.return_value = None
     return resp
 
 
 @patch("fish.httpx.get")
 def test_geocode_returns_lat_lon(mock_get):
-    mock_get.return_value = _mock_geocode_response(
-        [{"geometry": {"coordinates": [2.35, 48.85]}}]
-    )
+    mock_get.return_value = _mock_geocode_response([{"lat": "48.85", "lon": "2.35"}])
     lat, lon = fish.geocode("Paris")
     assert lat == 48.85
     assert lon == 2.35
@@ -484,6 +482,68 @@ def test_fetch_today_level_returns_none_when_no_result(mock_get):
     assert fish.fetch_today_level("X1") is None
 
 
+def _mock_tr_response(values, cursor=None):
+    resp = MagicMock()
+    resp.json.return_value = {
+        "data": [{"resultat_obs": v} for v in values],
+        "next": cursor,
+    }
+    resp.raise_for_status.return_value = None
+    return resp
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_aggregate_hixnj_returns_max(mock_get):
+    mock_get.return_value = _mock_tr_response([800.0, 813.0, 805.0])
+    assert fish.fetch_today_level("X1", grandeur="HIXnJ") == 813.0
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_aggregate_hinnj_returns_min(mock_get):
+    mock_get.return_value = _mock_tr_response([800.0, 813.0, 805.0])
+    assert fish.fetch_today_level("X1", grandeur="HINnJ") == 800.0
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_aggregate_hmnj_returns_mean(mock_get):
+    mock_get.return_value = _mock_tr_response([800.0, 810.0, 820.0])
+    assert fish.fetch_today_level("X1", grandeur="HmnJ") == 810.0
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_aggregate_unknown_returns_latest(mock_get):
+    mock_get.return_value = _mock_tr_response([800.0, 813.0, 805.0])
+    assert fish.fetch_today_level("X1", grandeur="Hwhatever") == 805.0
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_aggregate_empty_falls_back_to_instant(mock_get):
+    # Aggregate window empty (e.g. early morning before any obs uploaded), then
+    # the fallback instant call returns a stale-but-present latest reading.
+    mock_get.side_effect = [
+        _mock_tr_response([]),
+        _mock_response([{"resultat_obs": 813.0}]),
+    ]
+    assert fish.fetch_today_level("X1", grandeur="HIXnJ") == 813.0
+    assert mock_get.call_count == 2
+
+
+@patch("fish.httpx.get")
+def test_fetch_today_level_aggregate_paginates(mock_get):
+    cursor_url = (
+        "https://hubeau.eaufrance.fr/api/v2/hydrometrie/observations_tr?cursor=abc"
+    )
+    mock_get.side_effect = [
+        _mock_tr_response([700.0, 720.0], cursor=cursor_url),
+        _mock_tr_response([800.0]),
+    ]
+    assert fish.fetch_today_level("X1", grandeur="HIXnJ") == 800.0
+    assert mock_get.call_count == 2
+    second_call = mock_get.call_args_list[1]
+    assert second_call[0][0] == cursor_url
+    assert "params" not in second_call[1]
+
+
 # --- --date argument ---
 
 
@@ -512,8 +572,20 @@ def test_fetch_date_level_returns_value(mock_fetch):
         {"grandeur_hydro_elab": "HmnJ", "resultat_obs_elab": 500.0},
     ]
     result = fish.fetch_date_level("X1", date(2025, 6, 15))
-    mock_fetch.assert_called_once_with("X1", "2025-06-15", "2025-06-15")
+    mock_fetch.assert_called_once_with("X1", "2025-06-15", "2025-06-15", grandeur=None)
     assert result == 500.0
+
+
+@patch("fish.fetch_obs_elab")
+def test_fetch_date_level_passes_grandeur(mock_fetch):
+    mock_fetch.return_value = [
+        {"grandeur_hydro_elab": "HIXnJ", "resultat_obs_elab": 800.0},
+    ]
+    result = fish.fetch_date_level("X1", date(2025, 6, 15), grandeur="HIXnJ")
+    mock_fetch.assert_called_once_with(
+        "X1", "2025-06-15", "2025-06-15", grandeur="HIXnJ"
+    )
+    assert result == 800.0
 
 
 @patch("fish.fetch_obs_elab")
@@ -662,6 +734,86 @@ def test_rain_section_past_date_label():
     assert "Rain:" in output
     assert "Rain forecast" not in output
     assert "2.0 mm" in output
+
+
+def test_rain_section_renders_pressure_inline():
+    day = {
+        "hourly": [
+            {
+                "hour": "10:00",
+                "precipitation": 0.0,
+                "fishable": True,
+                "pressure_hpa": 1015.4,
+                "pressure_trend": "rising",
+            },
+            {
+                "hour": "11:00",
+                "precipitation": 0.2,
+                "fishable": True,
+                "pressure_hpa": 1014.1,
+                "pressure_trend": "falling",
+            },
+        ],
+    }
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_rain_section(day, is_today=True)
+        output = out.getvalue()
+    assert "1015.4 hPa" in output
+    assert "↑" in output
+    assert "1014.1 hPa" in output
+    assert "↓" in output
+
+
+def test_rain_section_handles_missing_pressure():
+    day = {
+        "hourly": [
+            {
+                "hour": "10:00",
+                "precipitation": 0.0,
+                "fishable": True,
+                "pressure_hpa": None,
+                "pressure_trend": None,
+            },
+        ],
+    }
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_rain_section(day, is_today=False)
+        output = out.getvalue()
+    assert "hPa" not in output
+    assert "0.0 mm" in output
+
+
+# --- annotate_pressure_trend ---
+
+
+def test_annotate_pressure_trend_rising():
+    hours = [{"pressure_hpa": 1000.0 + i} for i in range(6)]
+    fish.annotate_pressure_trend(hours)
+    assert hours[0]["pressure_trend"] is None
+    assert hours[1]["pressure_trend"] is None
+    assert hours[2]["pressure_trend"] is None
+    assert hours[3]["pressure_trend"] == "rising"
+    assert hours[5]["pressure_trend"] == "rising"
+
+
+def test_annotate_pressure_trend_falling():
+    hours = [{"pressure_hpa": 1020.0 - i * 2} for i in range(6)]
+    fish.annotate_pressure_trend(hours)
+    assert hours[3]["pressure_trend"] == "falling"
+    assert hours[5]["pressure_trend"] == "falling"
+
+
+def test_annotate_pressure_trend_stable():
+    hours = [{"pressure_hpa": 1013.0 + (i % 2) * 0.3} for i in range(6)]
+    fish.annotate_pressure_trend(hours)
+    assert hours[3]["pressure_trend"] == "stable"
+    assert hours[5]["pressure_trend"] == "stable"
+
+
+def test_annotate_pressure_trend_handles_none():
+    hours = [{"pressure_hpa": None} for _ in range(6)]
+    fish.annotate_pressure_trend(hours)
+    assert all(h["pressure_trend"] is None for h in hours)
 
 
 # --- degrees_to_compass ---
@@ -905,28 +1057,6 @@ def test_wind_section_shows_speed_and_gust():
     assert "18.0" in output
 
 
-def test_wind_section_overall_green():
-    day = _make_wind_day(
-        [("10:00", 8.0, 12.0, "N"), ("11:00", 10.0, 15.0, "NE")],
-        verdict="Great for casting",
-    )
-    with patch("sys.stdout", new_callable=StringIO) as out:
-        fish.print_wind_section(day, is_today=True)
-        output = out.getvalue()
-    assert "Great for casting" in output
-
-
-def test_wind_section_overall_red():
-    day = _make_wind_day(
-        [("10:00", 30.0, 40.0, "W")],
-        verdict="Too windy for fly fishing",
-    )
-    with patch("sys.stdout", new_callable=StringIO) as out:
-        fish.print_wind_section(day, is_today=True)
-        output = out.getvalue()
-    assert "Too windy for fly fishing" in output
-
-
 def test_wind_section_shows_technique_verdicts():
     verdicts = {t: "go" for t in fish.TECHNIQUES}
     verdicts["Mouche sèche"] = "no-go"
@@ -958,102 +1088,88 @@ def test_wind_section_dims_non_fishable():
     assert fish.DIM in output
 
 
-# --- print_summary ---
+# --- print_day_verdicts ---
 
 
-def test_summary_all_data():
-    rows = [("La Loue", "Station A", "X001", 900.0, 800.0, 10)]
-    day = {
-        "wind_verdict": "Great for casting",
-        "hourly": [
-            {"hour": "10:00", "precipitation": 0.0, "fishable": True},
-            {"hour": "11:00", "precipitation": 0.0, "fishable": True},
-        ],
-    }
+def test_day_verdicts_all_go():
+    verdicts = {t: "go" for t in fish.TECHNIQUES}
+    day = {"technique_verdicts": verdicts}
     with patch("sys.stdout", new_callable=StringIO) as out:
-        fish.print_summary(rows, day)
+        fish.print_day_verdicts(day)
+        output = out.getvalue()
+    for t in fish.TECHNIQUES:
+        assert t in output
+    assert "Go" in output
+
+
+def test_day_verdicts_mixed():
+    verdicts = {t: "go" for t in fish.TECHNIQUES}
+    verdicts["Mouche sèche"] = "no-go"
+    verdicts["Lancer UL"] = "difficult"
+    day = {"technique_verdicts": verdicts}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_day_verdicts(day)
+        output = out.getvalue()
+    assert "Mouche sèche: No-go" in output
+    assert "Lancer UL: Difficult" in output
+
+
+def test_day_verdicts_with_label():
+    verdicts = {t: "go" for t in fish.TECHNIQUES}
+    day = {"technique_verdicts": verdicts, "hourly": []}
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_day_verdicts(day, label="2026-03-29")
+        output = out.getvalue()
+    assert "2026-03-29" in output
+
+
+def test_day_verdicts_shows_levels():
+    verdicts = {t: "go" for t in fish.TECHNIQUES}
+    day = {"technique_verdicts": verdicts, "hourly": []}
+    rows = [("La Loue", "Station A", "X001", 900.0, 800.0, 10)]
+    with patch("sys.stdout", new_callable=StringIO) as out:
+        fish.print_day_verdicts(day, rows=rows)
         output = out.getvalue()
     assert "+12%" in output
-    assert "dry" in output.lower()
-    assert "Great for casting" in output
 
 
-def test_summary_above_and_below_avg():
-    rows_above = [("R", "S", "X", 1120.0, 1000.0, 5)]
-    rows_below = [("R", "S", "X", 800.0, 1000.0, 5)]
-    with patch("sys.stdout", new_callable=StringIO) as out:
-        fish.print_summary(rows_above)
-        assert "above" in out.getvalue().lower()
-    with patch("sys.stdout", new_callable=StringIO) as out:
-        fish.print_summary(rows_below)
-        assert "below" in out.getvalue().lower()
-
-
-def test_summary_with_rain():
-    rows = [("R", "S", "X", 500.0, 500.0, 5)]
+def test_day_verdicts_shows_rain():
+    verdicts = {t: "go" for t in fish.TECHNIQUES}
     day = {
-        "wind_verdict": "Great for casting",
+        "technique_verdicts": verdicts,
         "hourly": [
             {"hour": "10:00", "precipitation": 1.5, "fishable": True},
             {"hour": "11:00", "precipitation": 2.0, "fishable": True},
         ],
     }
     with patch("sys.stdout", new_callable=StringIO) as out:
-        fish.print_summary(rows, day)
+        fish.print_day_verdicts(day)
         output = out.getvalue()
-    assert "3.5 mm" in output
+    assert "3.5" in output
 
 
-def test_summary_no_levels():
-    rows = [("R", "S", "X", 500.0, None, 0)]
-    with patch("sys.stdout", new_callable=StringIO) as out:
-        fish.print_summary(rows)
-        output = out.getvalue()
-    assert ">>" in output
-
-
-def test_summary_wind_red():
-    rows = [("R", "S", "X", 500.0, 500.0, 5)]
+def test_day_verdicts_dry():
+    verdicts = {t: "go" for t in fish.TECHNIQUES}
     day = {
-        "wind_verdict": "Too windy for fly fishing",
+        "technique_verdicts": verdicts,
         "hourly": [
             {"hour": "10:00", "precipitation": 0.0, "fishable": True},
         ],
     }
     with patch("sys.stdout", new_callable=StringIO) as out:
-        fish.print_summary(rows, day)
+        fish.print_day_verdicts(day)
         output = out.getvalue()
-    assert "Too windy" in output
+    assert "dry" in output.lower()
 
 
-def test_summary_shows_avoid_when_some_nogo():
-    rows = [("R", "S", "X", 500.0, 500.0, 5)]
+def test_day_verdicts_levels_below():
     verdicts = {t: "go" for t in fish.TECHNIQUES}
-    verdicts["Mouche sèche"] = "no-go"
-    day = {
-        "wind_verdict": "Challenging conditions",
-        "hourly": [{"hour": "10:00", "precipitation": 0.0, "fishable": True}],
-        "technique_verdicts": verdicts,
-    }
+    day = {"technique_verdicts": verdicts, "hourly": []}
+    rows = [("R", "S", "X", 800.0, 1000.0, 5)]
     with patch("sys.stdout", new_callable=StringIO) as out:
-        fish.print_summary(rows, day)
+        fish.print_day_verdicts(day, rows=rows)
         output = out.getvalue()
-    assert "Avoid" in output
-    assert "Mouche" in output
-
-
-def test_summary_all_nogo():
-    rows = [("R", "S", "X", 500.0, 500.0, 5)]
-    verdicts = {t: "no-go" for t in fish.TECHNIQUES}
-    day = {
-        "wind_verdict": "Too windy for fly fishing",
-        "hourly": [{"hour": "10:00", "precipitation": 0.0, "fishable": True}],
-        "technique_verdicts": verdicts,
-    }
-    with patch("sys.stdout", new_callable=StringIO) as out:
-        fish.print_summary(rows, day)
-        output = out.getvalue()
-    assert "No technique practicable" in output
+    assert "-20%" in output
 
 
 # --- --json flag ---
@@ -1362,7 +1478,7 @@ def test_days_with_station_errors(capsys):
     assert "only valid" in capsys.readouterr().err
 
 
-@patch("fish.print_summary")
+@patch("fish.print_day_verdicts")
 @patch("fish.fetch_daily_forecast")
 @patch("fish.save_cache")
 @patch("fish.load_cache")
@@ -1378,7 +1494,7 @@ def test_days_human_mode_fetches_multiple_days(
     mock_cache,
     mock_save,
     mock_daily,
-    mock_summary,
+    mock_verdicts,
 ):
     mock_geo.return_value = (45.0, 3.0)
     mock_nearby.return_value = [
@@ -1440,6 +1556,86 @@ def test_days_human_mode_fetches_multiple_days(
     mock_daily.assert_called_once_with(45.0, 3.0, 2, start_date=None)
 
 
+@patch("fish.fetch_daily_forecast")
+@patch("fish.save_cache")
+@patch("fish.load_cache")
+@patch("fish.fetch_station_data")
+@patch("fish.fetch_today_level")
+@patch("fish.search_stations_nearby")
+@patch("fish.geocode")
+def test_days_prints_verdicts_per_day(
+    mock_geo,
+    mock_nearby,
+    mock_today,
+    mock_data,
+    mock_cache,
+    mock_save,
+    mock_daily,
+):
+    mock_geo.return_value = (45.0, 3.0)
+    mock_nearby.return_value = [
+        {"code_station": "X1", "libelle_station": "S", "libelle_cours_eau": "R"},
+    ]
+    mock_today.return_value = 900.0
+    mock_data.return_value = {
+        "dates": [],
+        "values": [],
+        "grandeur": "",
+        "avg": 800.0,
+        "avg_count": 10,
+    }
+    mock_cache.return_value = {"year": 2026, "data": {}}
+    verdicts1 = {t: "go" for t in fish.TECHNIQUES}
+    verdicts2 = {t: "no-go" for t in fish.TECHNIQUES}
+    day1 = {
+        "date": "2026-03-29",
+        "sunrise": "07:00",
+        "sunset": "19:30",
+        "peak_start": "10:15",
+        "peak_end": "14:15",
+        "wind_verdict": "Great for casting",
+        "technique_verdicts": verdicts1,
+        "hourly": [
+            {
+                "hour": "10:00",
+                "precipitation": 0.0,
+                "wind_kmh": 8.0,
+                "wind_gust_kmh": 12.0,
+                "direction_compass": "S",
+                "fishable": True,
+            },
+        ],
+    }
+    day2 = {
+        "date": "2026-03-30",
+        "sunrise": "06:58",
+        "sunset": "19:32",
+        "peak_start": "10:15",
+        "peak_end": "14:15",
+        "wind_verdict": "Too windy for fly fishing",
+        "technique_verdicts": verdicts2,
+        "hourly": [
+            {
+                "hour": "10:00",
+                "precipitation": 2.5,
+                "wind_kmh": 18.0,
+                "wind_gust_kmh": 25.0,
+                "direction_compass": "W",
+                "fishable": True,
+            },
+        ],
+    }
+    mock_daily.return_value = [day1, day2]
+    with patch("sys.argv", ["fish", "Test", "--days", "2"]):
+        with patch("sys.stdout", new_callable=StringIO) as out:
+            fish.main()
+    output = out.getvalue()
+    assert "2026-03-29" in output
+    assert "2026-03-30" in output
+    assert "Go" in output
+    assert "No-go" in output
+
+
 # --- fetch_daily_forecast ---
 
 
@@ -1472,6 +1668,7 @@ def test_fetch_daily_forecast_parses(mock_get):
             "wind_gusts_10m": [12.0, 15.0, 30.0, 35.0],
             "wind_direction_10m": [180, 200, 270, 290],
             "cloudcover": [30, 40, 80, 90],
+            "pressure_msl": [1013.2, 1013.5, 1010.0, 1009.4],
         },
     }
     mock_get.return_value = resp
@@ -1499,6 +1696,8 @@ def test_fetch_daily_forecast_parses(mock_get):
     assert h0["direction_deg"] == 180
     assert h0["direction_compass"] == "S"
     assert h0["cloudcover"] == 30
+    assert h0["pressure_hpa"] == 1013.2
+    assert "pressure_trend" in h0
     assert "fishable" in h0
     assert "wind_verdict" in day0
     # Technique verdicts present and correct for calm day0
